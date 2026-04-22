@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Dict, Iterable, Tuple
+from typing import Dict, Tuple
 
 import numpy as np
 
@@ -57,15 +57,13 @@ class ResourceCell(mesa.Agent):
         unique_id: int,
         model,
         terrain_type: str,
-        resource_amount: float = 0.0,
-        max_capacity: float = 100.0,
-        regen_rate: float = 2.0,
+        resource_value: float = 0.0,
+        carrying_capacity: float = 0.0,
     ) -> None:
         super().__init__(unique_id, model)
         self.terrain_type = terrain_type
-        self.resource_amount = float(resource_amount)
-        self.max_capacity = float(max_capacity)
-        self.regen_rate = float(regen_rate)
+        self.resource_value = float(resource_value)
+        self.carrying_capacity = float(carrying_capacity)
 
     @property
     def is_land(self) -> bool:
@@ -78,16 +76,10 @@ class ResourceCell(mesa.Agent):
     def harvest(self, amount: float) -> float:
         if not self.is_land or amount <= 0:
             return 0.0
-        gathered = min(self.resource_amount, amount)
-        self.resource_amount -= gathered
-        return gathered
+        return min(amount, self.resource_value * 10.0)
 
     def step(self) -> None:
-        if self.is_land:
-            self.resource_amount = min(
-                self.max_capacity,
-                self.resource_amount + self.regen_rate,
-            )
+        return None
 
 
 class Population(mesa.Agent):
@@ -119,6 +111,7 @@ class Population(mesa.Agent):
         self.economic_bank = 0.0
         self.diplomatic_bank = 0.0
         self.tech_bank = 0.0
+        self.growth_remainder = 0.0
 
     @property
     def traits(self) -> TraitMap:
@@ -158,14 +151,10 @@ class Population(mesa.Agent):
         return allocation
 
     def harvest(self) -> float:
-        cells = self.model.resource_cells_near(self.pos, include_center=True)
-        if not cells:
+        cell = self.model.resource_cell_at(self.pos)
+        if cell is None:
             return 0.0
-
-        efficiency = 1.0 + (self.economic_output() / 200.0)
-        demand = max(1.0, self.inhabitant_count * 0.08) * efficiency
-        demand_per_cell = demand / len(cells)
-        return sum(cell.harvest(demand_per_cell) for cell in cells)
+        return cell.resource_value * (1.0 + self.economic_output() / 200.0)
 
     def advance_tech(self) -> None:
         threshold = self.model.tech_threshold * (1.0 + self.tech_level * 0.35)
@@ -204,29 +193,40 @@ class Population(mesa.Agent):
                 neighbor.stockpile += trade_amount * 0.02
 
     def expand_or_migrate(self) -> None:
-        if self.inhabitant_count < self.model.expansion_threshold:
+        capacity = self.model.carrying_capacity_at(self.pos)
+        if capacity <= 0:
+            return
+        if self.inhabitant_count < capacity * self.model.expansion_pressure_threshold:
             return
 
-        candidate_positions = self.model.neighbor_positions(self.pos, moore=True)
-        self.model.rng.shuffle(candidate_positions)
+        candidate_positions = self.model.best_expansion_targets(self.pos)
+        if not candidate_positions:
+            return
 
-        migrants = max(1, int(self.inhabitant_count * self.model.migration_fraction))
+        overflow = max(0, int(self.inhabitant_count - capacity * 0.72))
+        migrants = max(
+            self.model.minimum_migrants,
+            overflow,
+            int(self.inhabitant_count * self.model.migration_fraction),
+        )
+        migrants = min(migrants, max(1, self.inhabitant_count - 1))
         for target_pos in candidate_positions:
             if self.model.attempt_expansion(self, target_pos, migrants):
                 self.inhabitant_count -= migrants
                 break
 
-    def consume_and_grow(self) -> None:
-        upkeep = self.inhabitant_count * self.model.resource_upkeep_per_person
-        if self.stockpile >= upkeep:
-            self.stockpile -= upkeep
-            growth = max(1, int(self.inhabitant_count * self.model.population_growth_rate))
-            self.inhabitant_count += growth
-        else:
-            shortage = upkeep - self.stockpile
-            self.stockpile = 0.0
-            losses = max(1, int(shortage / max(self.model.resource_upkeep_per_person, 0.01)))
-            self.inhabitant_count = max(1, self.inhabitant_count - losses)
+    def grow_logistically(self) -> None:
+        capacity = self.model.carrying_capacity_at(self.pos)
+        if capacity <= 0:
+            return
+
+        economic_bonus = 1.0 + (self.economic_output() / 250.0)
+        growth_rate = self.model.population_growth_rate * economic_bonus
+        population = float(self.inhabitant_count)
+        delta = growth_rate * population * (1.0 - population / capacity)
+        next_population = max(1.0, population + delta + self.growth_remainder)
+        self.inhabitant_count = max(1, int(next_population))
+        self.growth_remainder = next_population - self.inhabitant_count
 
     def step(self) -> None:
         harvested = self.harvest()
@@ -234,6 +234,6 @@ class Population(mesa.Agent):
         self.diffuse_tech()
         self.advance_tech()
         self.trade_with_neighbors()
-        self.consume_and_grow()
+        self.grow_logistically()
         self.drift_traits()
         self.expand_or_migrate()

@@ -38,6 +38,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Render an image and exit instead of opening the interactive viewer.",
     )
     parser.add_argument(
+        "--resource-overlay",
+        action="store_true",
+        help="Start with or render the static resource overlay.",
+    )
+    parser.add_argument(
         "--window-width",
         type=int,
         default=1280,
@@ -65,6 +70,9 @@ def print_summary(model: WorldModel, output: Optional[Path] = None) -> None:
     if output:
         print(f"Rendered world to {output}")
     print(f"Population agents: {latest['PopulationAgents']}")
+    print(f"Occupied tiles: {latest['OccupiedTiles']}")
+    print(f"Total inhabitants: {latest['TotalInhabitants']}")
+    print(f"Expansion events: {latest['ExpansionEvents']}")
     print(f"Surviving lineages: {latest['SurvivingLineages']}")
     print(f"Max tech level: {latest['MaxTech']}")
     print(f"Dominant trait: {latest['DominantTrait']}")
@@ -84,12 +92,20 @@ def main() -> None:
 
     if args.headless:
         output = args.output or Path("initialized_world.png")
-        model.render_map(output_path=str(output), show=False)
+        model.render_map(
+            output_path=str(output),
+            show=False,
+            resource_overlay=args.resource_overlay,
+        )
         print_summary(model, output)
         return
 
     if args.output:
-        model.render_map(output_path=str(args.output), show=False)
+        model.render_map(
+            output_path=str(args.output),
+            show=False,
+            resource_overlay=args.resource_overlay,
+        )
         print_summary(model, args.output)
 
     from viewer import InteractiveViewer
@@ -100,6 +116,7 @@ def main() -> None:
         height=args.window_height,
         fps=args.fps,
     )
+    viewer.show_resource_overlay = args.resource_overlay
     viewer.run()
     print_summary(model)
 

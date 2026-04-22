@@ -14,6 +14,8 @@ Color = Tuple[int, int, int]
 LAND_COLOR: Color = (46, 140, 61)
 WATER_COLOR: Color = (38, 89, 199)
 GRID_COLOR: Color = (24, 31, 42)
+LOW_RESOURCE_COLOR: Color = (97, 69, 31)
+HIGH_RESOURCE_COLOR: Color = (250, 214, 56)
 TEXT_COLOR: Color = (235, 238, 242)
 PANEL_COLOR: Color = (20, 24, 31)
 PANEL_BORDER: Color = (75, 84, 99)
@@ -56,6 +58,7 @@ class InteractiveViewer:
         self.playing = False
         self.steps_per_second = 4.0
         self.step_accumulator = 0.0
+        self.show_resource_overlay = False
 
         self.center_map()
 
@@ -102,6 +105,8 @@ class InteractiveViewer:
             self.model.step()
         elif key == pygame.K_r:
             self.center_map()
+        elif key in (pygame.K_m, pygame.K_TAB):
+            self.show_resource_overlay = not self.show_resource_overlay
         elif key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
             self.zoom_at(self.screen_center(), 1.12)
         elif key in (pygame.K_MINUS, pygame.K_KP_MINUS):
@@ -184,7 +189,7 @@ class InteractiveViewer:
         tile = max(1, int(self.tile_size + 1))
         for y in range(start_y, end_y):
             for x in range(start_x, end_x):
-                color = LAND_COLOR if self.model.terrain_map[y, x] else WATER_COLOR
+                color = self.tile_color(x, y)
                 rect = pygame.Rect(
                     int(self.camera_x + x * self.tile_size),
                     int(self.camera_y + y * self.tile_size),
@@ -195,6 +200,7 @@ class InteractiveViewer:
 
         if self.tile_size >= 14:
             self.draw_grid(start_x, start_y, end_x, end_y)
+        self.draw_owned_tiles()
         self.draw_populations()
 
     def draw_grid(self, start_x: int, start_y: int, end_x: int, end_y: int) -> None:
@@ -234,9 +240,47 @@ class InteractiveViewer:
             pygame.draw.circle(self.screen, (245, 246, 248), center, radius, 2)
 
             if self.tile_size >= 22:
-                label = self.small_font.render(str(population.tech_level), True, TEXT_COLOR)
+                label = self.small_font.render(
+                    str(population.inhabitant_count),
+                    True,
+                    TEXT_COLOR,
+                )
                 label_rect = label.get_rect(center=center)
                 self.screen.blit(label, label_rect)
+
+    def draw_owned_tiles(self) -> None:
+        inset = max(1, int(self.tile_size * 0.08))
+        size = max(2, int(self.tile_size - inset * 2))
+        for population in self.model.populations:
+            x, y = population.pos
+            lineage_color = hex_to_rgb(population.lineage_color)
+            base_color = self.tile_color(x, y)
+            color = tuple(
+                int(lineage_color[index] * 0.65 + base_color[index] * 0.35)
+                for index in range(3)
+            )
+            rect = pygame.Rect(
+                int(self.camera_x + x * self.tile_size + inset),
+                int(self.camera_y + y * self.tile_size + inset),
+                size,
+                size,
+            )
+            pygame.draw.rect(self.screen, color, rect, border_radius=2)
+
+    def tile_color(self, x: int, y: int) -> Color:
+        if not self.model.terrain_map[y, x]:
+            return WATER_COLOR
+        if not self.show_resource_overlay:
+            return LAND_COLOR
+
+        resource = float(self.model.resource_map[y, x])
+        return tuple(
+            int(
+                LOW_RESOURCE_COLOR[index]
+                + resource * (HIGH_RESOURCE_COLOR[index] - LOW_RESOURCE_COLOR[index])
+            )
+            for index in range(3)
+        )
 
     def draw_status_panel(self) -> None:
         latest = self.model.datacollector.get_model_vars_dataframe().iloc[-1]
@@ -244,9 +288,13 @@ class InteractiveViewer:
             f"Step {int(latest['Step'])}",
             f"{'Playing' if self.playing else 'Paused'}",
             f"Populations {int(latest['PopulationAgents'])}",
+            f"Occupied {int(latest['OccupiedTiles'])}",
+            f"Inhabitants {int(latest['TotalInhabitants'])}",
+            f"Expansions {int(latest['ExpansionEvents'])}",
             f"Lineages {int(latest['SurvivingLineages'])}",
             f"Max tech {int(latest['MaxTech'])}",
             f"Dominant {latest['DominantTrait']}",
+            f"Map {'Resources' if self.show_resource_overlay else 'Terrain'}",
             f"Zoom {self.tile_size:.1f} px",
         ]
 

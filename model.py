@@ -6,7 +6,7 @@ import colorsys
 import random
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 import matplotlib
 
@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from agents import Population, ResourceCell, TraitMap, normalize_traits, random_traits
+from agents import Population, ResourceCell, random_traits
 
 try:
     import mesa
@@ -175,10 +175,9 @@ CollectorClass = DataCollector or FallbackDataCollector
 class TerrainConfig:
     land_fraction: float = 0.58
     smoothing_passes: int = 5
-    land_capacity_min: float = 70.0
-    land_capacity_max: float = 130.0
-    land_regen_min: float = 1.2
-    land_regen_max: float = 3.0
+    resource_smoothing_passes: int = 7
+    carrying_capacity_min: float = 90.0
+    carrying_capacity_max: float = 520.0
 
 
 class WorldModel(mesa.Model):
@@ -204,16 +203,19 @@ class WorldModel(mesa.Model):
         self.schedule = SchedulerClass(self)
         self._next_id = 1
         self.resource_cells: Dict[Position, ResourceCell] = {}
+        self.expansion_events = 0
 
         self.tech_threshold = 35.0
         self.tech_diffusion_rate = 0.35
         self.trait_drift_rate = 0.35
-        self.expansion_threshold = 145
-        self.migration_fraction = 0.25
-        self.resource_upkeep_per_person = 0.035
-        self.population_growth_rate = 0.025
+        self.expansion_pressure_threshold = 0.68
+        self.migration_fraction = 0.22
+        self.minimum_migrants = 14
+        self.population_growth_rate = 0.085
 
         self.terrain_map = self._generate_terrain()
+        self.resource_map = self._generate_resource_map()
+        self.carrying_capacity_map = self._generate_carrying_capacity_map()
         self._populate_resource_layer()
         self._seed_populations()
 
@@ -223,6 +225,9 @@ class WorldModel(mesa.Model):
                 "SurvivingLineages": lambda model: model.surviving_lineage_count(),
                 "DominantTrait": lambda model: model.dominant_trait(),
                 "PopulationAgents": lambda model: len(model.populations),
+                "TotalInhabitants": lambda model: model.total_inhabitants(),
+                "OccupiedTiles": lambda model: len(model.populations),
+                "ExpansionEvents": lambda model: model.expansion_events,
             },
             agent_reporters={
                 "Inhabitants": lambda agent: getattr(agent, "inhabitant_count", None),
@@ -243,9 +248,9 @@ class WorldModel(mesa.Model):
             agent for agent in self.schedule.agents if isinstance(agent, Population)
         ]
 
-    def _generate_terrain(self) -> np.ndarray:
+    def _smooth_noise(self, smoothing_passes: int) -> np.ndarray:
         noise = self.rng.random((self.height, self.width))
-        for _ in range(self.terrain_config.smoothing_passes):
+        for _ in range(smoothing_passes):
             padded = np.pad(noise, 1, mode="edge")
             noise = (
                 padded[:-2, :-2]
@@ -258,36 +263,49 @@ class WorldModel(mesa.Model):
                 + padded[2:, 1:-1]
                 + padded[2:, 2:]
             ) / 9.0
+        return noise
 
+    def _generate_terrain(self) -> np.ndarray:
+        noise = self._smooth_noise(self.terrain_config.smoothing_passes)
         threshold = np.quantile(noise, 1.0 - self.terrain_config.land_fraction)
         return noise >= threshold
+
+    def _generate_resource_map(self) -> np.ndarray:
+        resource_noise = self._smooth_noise(self.terrain_config.resource_smoothing_passes)
+        land_values = resource_noise[self.terrain_map]
+        resource_map = np.zeros((self.height, self.width), dtype=float)
+        if land_values.size == 0:
+            return resource_map
+
+        low = float(land_values.min())
+        high = float(land_values.max())
+        if high == low:
+            normalized = np.ones_like(resource_noise)
+        else:
+            normalized = (resource_noise - low) / (high - low)
+        resource_map[self.terrain_map] = np.clip(normalized[self.terrain_map], 0.0, 1.0)
+        return resource_map
+
+    def _generate_carrying_capacity_map(self) -> np.ndarray:
+        minimum = self.terrain_config.carrying_capacity_min
+        maximum = self.terrain_config.carrying_capacity_max
+        capacity = minimum + self.resource_map * (maximum - minimum)
+        capacity[~self.terrain_map] = 0.0
+        return capacity
 
     def _populate_resource_layer(self) -> None:
         for y in range(self.height):
             for x in range(self.width):
                 is_land = bool(self.terrain_map[y, x])
-                if is_land:
-                    capacity = self.rng.uniform(
-                        self.terrain_config.land_capacity_min,
-                        self.terrain_config.land_capacity_max,
-                    )
-                    starting_resources = capacity * self.rng.uniform(0.35, 0.85)
-                    regen_rate = self.rng.uniform(
-                        self.terrain_config.land_regen_min,
-                        self.terrain_config.land_regen_max,
-                    )
-                else:
-                    capacity = 0.0
-                    starting_resources = 0.0
-                    regen_rate = 0.0
+                resource_value = float(self.resource_map[y, x])
+                capacity = float(self.carrying_capacity_map[y, x])
 
                 cell = ResourceCell(
                     unique_id=self.next_id(),
                     model=self,
                     terrain_type="Land" if is_land else "Water",
-                    resource_amount=starting_resources,
-                    max_capacity=capacity,
-                    regen_rate=regen_rate,
+                    resource_value=resource_value,
+                    carrying_capacity=capacity,
                 )
                 pos = (x, y)
                 self.resource_cells[pos] = cell
@@ -304,7 +322,7 @@ class WorldModel(mesa.Model):
             population = Population(
                 unique_id=self.next_id(),
                 model=self,
-                inhabitant_count=int(self.rng.integers(70, 120)),
+                inhabitant_count=int(self.rng.integers(35, 80)),
                 stockpile=float(self.rng.uniform(35.0, 80.0)),
                 tech_level=0,
                 lineage_color=self._lineage_color(index),
@@ -349,6 +367,17 @@ class WorldModel(mesa.Model):
         positions = self.neighbor_positions(pos, moore=True, include_center=include_center)
         return [self.resource_cells[position] for position in positions]
 
+    def resource_cell_at(self, pos: Position) -> Optional[ResourceCell]:
+        return self.resource_cells.get(pos)
+
+    def resource_value_at(self, pos: Position) -> float:
+        x, y = pos
+        return float(self.resource_map[y, x])
+
+    def carrying_capacity_at(self, pos: Position) -> float:
+        x, y = pos
+        return float(self.carrying_capacity_map[y, x])
+
     def populations_near(self, pos: Position) -> List[Population]:
         agents = self.grid.get_cell_list_contents(
             self.neighbor_positions(pos, moore=True, include_center=False)
@@ -373,39 +402,9 @@ class WorldModel(mesa.Model):
             return False
 
         occupant = self.population_at(target_pos)
-        if occupant is None:
-            child = Population(
-                unique_id=self.next_id(),
-                model=self,
-                inhabitant_count=migrants,
-                stockpile=parent.stockpile * 0.20,
-                tech_level=parent.tech_level,
-                lineage_color=parent.lineage_color,
-                traits=parent.traits,
-            )
-            parent.stockpile *= 0.80
-            self.grid.place_agent(child, target_pos)
-            self.schedule.add(child)
-            return True
-
-        if occupant.lineage_color == parent.lineage_color:
-            occupant.inhabitant_count += migrants
-            return True
-
-        land_desire_score = max(0.0, parent.inhabitant_count - self.expansion_threshold)
-        deterrence_score = occupant.diplomatic_output() * 1.4 + occupant.military_output() * 0.6
-        if deterrence_score > land_desire_score:
+        if occupant is not None:
             return False
 
-        attacker_strength = parent.military_output() * migrants
-        defender_strength = occupant.military_output() * occupant.inhabitant_count
-        if attacker_strength <= defender_strength:
-            parent.inhabitant_count = max(1, parent.inhabitant_count - migrants)
-            occupant.inhabitant_count = max(1, int(occupant.inhabitant_count * 0.85))
-            return False
-
-        self.grid.remove_agent(occupant)
-        self.schedule.remove(occupant)
         child = Population(
             unique_id=self.next_id(),
             model=self,
@@ -418,13 +417,34 @@ class WorldModel(mesa.Model):
         parent.stockpile *= 0.80
         self.grid.place_agent(child, target_pos)
         self.schedule.add(child)
+        self.expansion_events += 1
         return True
+
+    def best_expansion_targets(self, pos: Position) -> List[Position]:
+        candidates = []
+        for target_pos in self.neighbor_positions(pos, moore=True):
+            target_cell = self.resource_cells.get(target_pos)
+            if target_cell is None or not target_cell.is_land:
+                continue
+            if self.population_at(target_pos) is not None:
+                continue
+            candidates.append(target_pos)
+
+        self.rng.shuffle(candidates)
+        candidates.sort(
+            key=lambda candidate: self.carrying_capacity_at(candidate),
+            reverse=True,
+        )
+        return candidates
 
     def max_tech_level(self) -> int:
         return max((population.tech_level for population in self.populations), default=0)
 
     def surviving_lineage_count(self) -> int:
         return len({population.lineage_color for population in self.populations})
+
+    def total_inhabitants(self) -> int:
+        return sum(population.inhabitant_count for population in self.populations)
 
     def dominant_trait(self) -> str:
         totals = {key: 0.0 for key in ("military_pct", "economic_pct", "diplomatic_pct", "tech_pct")}
@@ -439,10 +459,13 @@ class WorldModel(mesa.Model):
         self.schedule.step()
         self.datacollector.collect(self)
 
-    def render_map(self, output_path: Optional[str] = None, show: bool = False):
-        terrain_rgb = np.zeros((self.height, self.width, 3), dtype=float)
-        terrain_rgb[self.terrain_map] = (0.18, 0.55, 0.24)
-        terrain_rgb[~self.terrain_map] = (0.15, 0.35, 0.78)
+    def render_map(
+        self,
+        output_path: Optional[str] = None,
+        show: bool = False,
+        resource_overlay: bool = False,
+    ):
+        terrain_rgb = self.render_rgb_array(resource_overlay=resource_overlay)
 
         fig, ax = plt.subplots(figsize=(10, 7))
         ax.imshow(terrain_rgb, origin="lower")
@@ -460,7 +483,8 @@ class WorldModel(mesa.Model):
                 zorder=3,
             )
 
-        ax.set_title("Initialized ABM World")
+        title = "ABM World - Resource Overlay" if resource_overlay else "ABM World"
+        ax.set_title(title)
         ax.set_xlabel("X")
         ax.set_ylabel("Y")
         ax.set_xlim(-0.5, self.width - 0.5)
@@ -476,3 +500,21 @@ class WorldModel(mesa.Model):
         else:
             plt.close(fig)
         return fig
+
+    def render_rgb_array(self, resource_overlay: bool = False) -> np.ndarray:
+        terrain_rgb = np.zeros((self.height, self.width, 3), dtype=float)
+        terrain_rgb[self.terrain_map] = (0.18, 0.55, 0.24)
+        terrain_rgb[~self.terrain_map] = (0.15, 0.35, 0.78)
+        if not resource_overlay:
+            return terrain_rgb
+
+        low_resource = np.array((0.38, 0.27, 0.12))
+        high_resource = np.array((0.98, 0.84, 0.22))
+        resource_rgb = low_resource + self.resource_map[..., None] * (
+            high_resource - low_resource
+        )
+        terrain_rgb[self.terrain_map] = (
+            terrain_rgb[self.terrain_map] * 0.35
+            + resource_rgb[self.terrain_map] * 0.65
+        )
+        return terrain_rgb
