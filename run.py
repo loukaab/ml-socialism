@@ -1,0 +1,67 @@
+"""Command-line entry point for the phase-1 economic simulator."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+from model import WorldModel
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run the phase-1 ABM world.")
+    parser.add_argument("--width", type=int, default=50, help="Grid width.")
+    parser.add_argument("--height", type=int, default=35, help="Grid height.")
+    parser.add_argument(
+        "--populations",
+        type=int,
+        default=8,
+        help="Number of founding population agents.",
+    )
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=0,
+        help="Simulation ticks to run after initialization.",
+    )
+    parser.add_argument("--seed", type=int, default=7, help="Random seed.")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("initialized_world.png"),
+        help="Path for the rendered map image.",
+    )
+    parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Open a Matplotlib window after rendering.",
+    )
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    model = WorldModel(
+        width=args.width,
+        height=args.height,
+        initial_populations=args.populations,
+        seed=args.seed,
+    )
+
+    for _ in range(args.steps):
+        model.step()
+
+    model.render_map(output_path=str(args.output), show=args.show)
+
+    model_data = model.datacollector.get_model_vars_dataframe()
+    latest = model_data.iloc[-1].to_dict()
+
+    print(f"Rendered initialized world to {args.output}")
+    print(f"Population agents: {latest['PopulationAgents']}")
+    print(f"Surviving lineages: {latest['SurvivingLineages']}")
+    print(f"Max tech level: {latest['MaxTech']}")
+    print(f"Dominant trait: {latest['DominantTrait']}")
+
+
+if __name__ == "__main__":
+    main()
