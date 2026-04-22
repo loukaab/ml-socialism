@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Optional
 
 from model import WorldModel
 
@@ -22,21 +23,51 @@ def build_parser() -> argparse.ArgumentParser:
         "--steps",
         type=int,
         default=0,
-        help="Simulation ticks to run after initialization.",
+        help="Simulation ticks to run before opening or rendering.",
     )
     parser.add_argument("--seed", type=int, default=7, help="Random seed.")
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("initialized_world.png"),
-        help="Path for the rendered map image.",
+        default=None,
+        help="Optional path for a rendered map image.",
     )
     parser.add_argument(
-        "--show",
+        "--headless",
         action="store_true",
-        help="Open a Matplotlib window after rendering.",
+        help="Render an image and exit instead of opening the interactive viewer.",
+    )
+    parser.add_argument(
+        "--window-width",
+        type=int,
+        default=1280,
+        help="Interactive window width.",
+    )
+    parser.add_argument(
+        "--window-height",
+        type=int,
+        default=820,
+        help="Interactive window height.",
+    )
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=60,
+        help="Interactive viewer frame limit.",
     )
     return parser
+
+
+def print_summary(model: WorldModel, output: Optional[Path] = None) -> None:
+    model_data = model.datacollector.get_model_vars_dataframe()
+    latest = model_data.iloc[-1].to_dict()
+
+    if output:
+        print(f"Rendered world to {output}")
+    print(f"Population agents: {latest['PopulationAgents']}")
+    print(f"Surviving lineages: {latest['SurvivingLineages']}")
+    print(f"Max tech level: {latest['MaxTech']}")
+    print(f"Dominant trait: {latest['DominantTrait']}")
 
 
 def main() -> None:
@@ -51,16 +82,26 @@ def main() -> None:
     for _ in range(args.steps):
         model.step()
 
-    model.render_map(output_path=str(args.output), show=args.show)
+    if args.headless:
+        output = args.output or Path("initialized_world.png")
+        model.render_map(output_path=str(output), show=False)
+        print_summary(model, output)
+        return
 
-    model_data = model.datacollector.get_model_vars_dataframe()
-    latest = model_data.iloc[-1].to_dict()
+    if args.output:
+        model.render_map(output_path=str(args.output), show=False)
+        print_summary(model, args.output)
 
-    print(f"Rendered initialized world to {args.output}")
-    print(f"Population agents: {latest['PopulationAgents']}")
-    print(f"Surviving lineages: {latest['SurvivingLineages']}")
-    print(f"Max tech level: {latest['MaxTech']}")
-    print(f"Dominant trait: {latest['DominantTrait']}")
+    from viewer import InteractiveViewer
+
+    viewer = InteractiveViewer(
+        model,
+        width=args.window_width,
+        height=args.window_height,
+        fps=args.fps,
+    )
+    viewer.run()
+    print_summary(model)
 
 
 if __name__ == "__main__":
