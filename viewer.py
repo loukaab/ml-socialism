@@ -19,6 +19,8 @@ HIGH_RESOURCE_COLOR: Color = (250, 214, 56)
 TEXT_COLOR: Color = (235, 238, 242)
 PANEL_COLOR: Color = (20, 24, 31)
 PANEL_BORDER: Color = (75, 84, 99)
+MIN_POPULATION_BRIGHTNESS = 0.35
+POPULATION_BRIGHTNESS_GAMMA = 0.65
 
 
 def hex_to_rgb(value: str) -> Color:
@@ -45,6 +47,7 @@ class InteractiveViewer:
         self.clock = pygame.time.Clock()
         self.font = pygame.font.Font(None, 22)
         self.small_font = pygame.font.Font(None, 18)
+        self.tile_fonts = {}
         self.fps = fps
 
         self.tile_size = initial_tile_size
@@ -198,10 +201,10 @@ class InteractiveViewer:
                 )
                 pygame.draw.rect(self.screen, color, rect)
 
+        self.draw_owned_tiles()
+        self.draw_hover_population_label()
         if self.tile_size >= 14:
             self.draw_grid(start_x, start_y, end_x, end_y)
-        self.draw_owned_tiles()
-        self.draw_populations()
 
     def draw_grid(self, start_x: int, start_y: int, end_x: int, end_y: int) -> None:
         for x in range(start_x, end_x + 1):
@@ -223,49 +226,71 @@ class InteractiveViewer:
                 1,
             )
 
-    def draw_populations(self) -> None:
+    def draw_owned_tiles(self) -> None:
+        tile = max(1, int(self.tile_size + 1))
         for population in self.model.populations:
             x, y = population.pos
-            center = (
+            color = self.population_tile_color(population)
+            rect = pygame.Rect(
+                int(self.camera_x + x * self.tile_size),
+                int(self.camera_y + y * self.tile_size),
+                tile,
+                tile,
+            )
+            pygame.draw.rect(self.screen, color, rect)
+
+    def draw_hover_population_label(self) -> None:
+        if self.tile_size < 12:
+            return
+
+        tile_pos = self.screen_to_tile(pygame.mouse.get_pos())
+        if tile_pos is None:
+            return
+
+        population = self.model.population_at(tile_pos)
+        if population is None:
+            return
+
+        font = self.tile_label_font()
+        x, y = population.pos
+        label_text = str(population.inhabitant_count)
+        shadow = self.fit_label(label_text, font, (0, 0, 0))
+        label = self.fit_label(label_text, font, TEXT_COLOR)
+        label_rect = label.get_rect(
+            center=(
                 int(self.camera_x + (x + 0.5) * self.tile_size),
                 int(self.camera_y + (y + 0.5) * self.tile_size),
             )
-            radius = int(max(4, min(self.tile_size * 0.42, population.inhabitant_count / 8)))
-            pygame.draw.circle(
-                self.screen,
-                hex_to_rgb(population.lineage_color),
-                center,
-                radius,
-            )
-            pygame.draw.circle(self.screen, (245, 246, 248), center, radius, 2)
+        )
+        shadow_rect = shadow.get_rect(center=(label_rect.centerx + 1, label_rect.centery + 1))
+        self.screen.blit(shadow, shadow_rect)
+        self.screen.blit(label, label_rect)
 
-            if self.tile_size >= 22:
-                label = self.small_font.render(
-                    str(population.inhabitant_count),
-                    True,
-                    TEXT_COLOR,
-                )
-                label_rect = label.get_rect(center=center)
-                self.screen.blit(label, label_rect)
+    def tile_label_font(self):
+        size = max(10, min(24, int(self.tile_size * 0.42)))
+        if size not in self.tile_fonts:
+            self.tile_fonts[size] = pygame.font.Font(None, size)
+        return self.tile_fonts[size]
 
-    def draw_owned_tiles(self) -> None:
-        inset = max(1, int(self.tile_size * 0.08))
-        size = max(2, int(self.tile_size - inset * 2))
-        for population in self.model.populations:
-            x, y = population.pos
-            lineage_color = hex_to_rgb(population.lineage_color)
-            base_color = self.tile_color(x, y)
-            color = tuple(
-                int(lineage_color[index] * 0.65 + base_color[index] * 0.35)
-                for index in range(3)
-            )
-            rect = pygame.Rect(
-                int(self.camera_x + x * self.tile_size + inset),
-                int(self.camera_y + y * self.tile_size + inset),
-                size,
-                size,
-            )
-            pygame.draw.rect(self.screen, color, rect, border_radius=2)
+    def fit_label(self, text: str, font, color: Color):
+        label = font.render(text, True, color)
+        max_width = max(4, int(self.tile_size * 0.88))
+        max_height = max(4, int(self.tile_size * 0.72))
+        if label.get_width() <= max_width and label.get_height() <= max_height:
+            return label
+
+        scale = min(max_width / label.get_width(), max_height / label.get_height())
+        width = max(1, int(label.get_width() * scale))
+        height = max(1, int(label.get_height() * scale))
+        return pygame.transform.smoothscale(label, (width, height))
+
+    def population_tile_color(self, population) -> Color:
+        lineage_color = hex_to_rgb(population.lineage_color)
+        capacity = max(1.0, self.model.carrying_capacity_at(population.pos))
+        fullness = min(1.0, max(0.0, population.inhabitant_count / capacity))
+        curved = fullness ** POPULATION_BRIGHTNESS_GAMMA
+        brightness = 1.0 - curved * (1.0 - MIN_POPULATION_BRIGHTNESS)
+        return tuple(int(channel * brightness) for channel in lineage_color)
 
     def tile_color(self, x: int, y: int) -> Color:
         if not self.model.terrain_map[y, x]:
@@ -284,6 +309,7 @@ class InteractiveViewer:
 
     def draw_status_panel(self) -> None:
         latest = self.model.datacollector.get_model_vars_dataframe().iloc[-1]
+        hover_text = self.hover_text()
         rows = [
             f"Step {int(latest['Step'])}",
             f"{'Playing' if self.playing else 'Paused'}",
@@ -296,6 +322,7 @@ class InteractiveViewer:
             f"Dominant {latest['DominantTrait']}",
             f"Map {'Resources' if self.show_resource_overlay else 'Terrain'}",
             f"Zoom {self.tile_size:.1f} px",
+            hover_text,
         ]
 
         width = 190
@@ -307,3 +334,20 @@ class InteractiveViewer:
         for index, row in enumerate(rows):
             surface = self.font.render(row, True, TEXT_COLOR)
             self.screen.blit(surface, (26, 24 + index * 24))
+
+    def hover_text(self) -> str:
+        tile_pos = self.screen_to_tile(pygame.mouse.get_pos())
+        if tile_pos is None:
+            return "Hover off map"
+
+        population = self.model.population_at(tile_pos)
+        if population is None:
+            return f"Hover {tile_pos}: 0"
+        return f"Hover {tile_pos}: {population.inhabitant_count}"
+
+    def screen_to_tile(self, screen_pos: Tuple[int, int]) -> Optional[Tuple[int, int]]:
+        x = int((screen_pos[0] - self.camera_x) // self.tile_size)
+        y = int((screen_pos[1] - self.camera_y) // self.tile_size)
+        if 0 <= x < self.model.width and 0 <= y < self.model.height:
+            return x, y
+        return None

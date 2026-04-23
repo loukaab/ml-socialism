@@ -44,6 +44,24 @@ except (ModuleNotFoundError, ImportError):
 
 Position = Tuple[int, int]
 
+LINEAGE_COLORS = (
+    "#e83f6f",
+    "#a855f7",
+    "#f43f5e",
+    "#ec4899",
+    "#8b5cf6",
+    "#d946ef",
+    "#fb7185",
+    "#c026d3",
+    "#7c3aed",
+    "#be123c",
+    "#f0abfc",
+    "#881337",
+)
+
+MIN_POPULATION_BRIGHTNESS = 0.35
+POPULATION_BRIGHTNESS_GAMMA = 0.65
+
 
 class FallbackMultiGrid:
     """Small subset of Mesa's MultiGrid API used by this project."""
@@ -332,8 +350,11 @@ class WorldModel(mesa.Model):
             self.schedule.add(population)
 
     def _lineage_color(self, index: int) -> str:
-        hue = (index * 0.61803398875) % 1.0
-        red, green, blue = colorsys.hsv_to_rgb(hue, 0.72, 0.92)
+        if index < len(LINEAGE_COLORS):
+            return LINEAGE_COLORS[index]
+
+        hue = (0.83 + index * 0.071) % 1.0
+        red, green, blue = colorsys.hsv_to_rgb(hue, 0.78, 0.95)
         return f"#{int(red * 255):02x}{int(green * 255):02x}{int(blue * 255):02x}"
 
     def resource_cells_by_terrain(self, terrain_type: str) -> Iterable[Position]:
@@ -466,22 +487,12 @@ class WorldModel(mesa.Model):
         resource_overlay: bool = False,
     ):
         terrain_rgb = self.render_rgb_array(resource_overlay=resource_overlay)
+        for population in self.populations:
+            x, y = population.pos
+            terrain_rgb[y, x] = self.population_rgb(population)
 
         fig, ax = plt.subplots(figsize=(10, 7))
         ax.imshow(terrain_rgb, origin="lower")
-
-        for population in self.populations:
-            x, y = population.pos
-            ax.scatter(
-                [x],
-                [y],
-                s=max(55, min(210, population.inhabitant_count * 1.5)),
-                color=population.lineage_color,
-                edgecolors="white",
-                linewidths=1.2,
-                marker="o",
-                zorder=3,
-            )
 
         title = "ABM World - Resource Overlay" if resource_overlay else "ABM World"
         ax.set_title(title)
@@ -518,3 +529,18 @@ class WorldModel(mesa.Model):
             + resource_rgb[self.terrain_map] * 0.65
         )
         return terrain_rgb
+
+    def population_rgb(self, population) -> np.ndarray:
+        lineage = population.lineage_color.lstrip("#")
+        rgb = np.array(
+            [
+                int(lineage[0:2], 16) / 255.0,
+                int(lineage[2:4], 16) / 255.0,
+                int(lineage[4:6], 16) / 255.0,
+            ]
+        )
+        capacity = max(1.0, self.carrying_capacity_at(population.pos))
+        fullness = min(1.0, max(0.0, population.inhabitant_count / capacity))
+        curved = fullness ** POPULATION_BRIGHTNESS_GAMMA
+        brightness = 1.0 - curved * (1.0 - MIN_POPULATION_BRIGHTNESS)
+        return rgb * brightness
