@@ -21,6 +21,7 @@ PANEL_COLOR: Color = (20, 24, 31)
 PANEL_BORDER: Color = (75, 84, 99)
 MIN_POPULATION_BRIGHTNESS = 0.35
 POPULATION_BRIGHTNESS_GAMMA = 0.65
+MAP_MODES = ("terrain", "resources", "tech", "diplo", "physical")
 
 
 def hex_to_rgb(value: str) -> Color:
@@ -61,9 +62,17 @@ class InteractiveViewer:
         self.playing = False
         self.steps_per_second = 4.0
         self.step_accumulator = 0.0
-        self.show_resource_overlay = False
+        self.map_mode = "terrain"
 
         self.center_map()
+
+    @property
+    def show_resource_overlay(self) -> bool:
+        return self.map_mode == "resources"
+
+    @show_resource_overlay.setter
+    def show_resource_overlay(self, enabled: bool) -> None:
+        self.map_mode = "resources" if enabled else "terrain"
 
     def center_map(self) -> None:
         screen_width, screen_height = self.screen.get_size()
@@ -109,7 +118,17 @@ class InteractiveViewer:
         elif key == pygame.K_r:
             self.center_map()
         elif key in (pygame.K_m, pygame.K_TAB):
-            self.show_resource_overlay = not self.show_resource_overlay
+            self.cycle_map_mode()
+        elif key in (pygame.K_1, pygame.K_KP1):
+            self.map_mode = "terrain"
+        elif key in (pygame.K_2, pygame.K_KP2):
+            self.map_mode = "resources"
+        elif key in (pygame.K_3, pygame.K_KP3):
+            self.map_mode = "tech"
+        elif key in (pygame.K_4, pygame.K_KP4):
+            self.map_mode = "diplo"
+        elif key in (pygame.K_5, pygame.K_KP5):
+            self.map_mode = "physical"
         elif key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
             self.zoom_at(self.screen_center(), 1.12)
         elif key in (pygame.K_MINUS, pygame.K_KP_MINUS):
@@ -122,6 +141,10 @@ class InteractiveViewer:
             self.camera_x += 32
         elif key in (pygame.K_RIGHT, pygame.K_d):
             self.camera_x -= 32
+
+    def cycle_map_mode(self) -> None:
+        index = MAP_MODES.index(self.map_mode)
+        self.map_mode = MAP_MODES[(index + 1) % len(MAP_MODES)]
 
     def handle_mouse_down(self, event) -> None:
         if event.button in (1, 2, 3):
@@ -285,6 +308,23 @@ class InteractiveViewer:
         return pygame.transform.smoothscale(label, (width, height))
 
     def population_tile_color(self, population) -> Color:
+        if self.map_mode == "tech":
+            return self.dark_investment_color(
+                population.x_tech,
+                max_value=0.3,
+                light=(222, 210, 255),
+                dark=(44, 22, 92),
+            )
+        if self.map_mode == "diplo":
+            return self.dark_investment_color(
+                population.y_dip,
+                max_value=0.3,
+                light=(255, 212, 232),
+                dark=(95, 18, 58),
+            )
+        if self.map_mode == "physical":
+            return self.physical_split_color(population.e_econ_ratio)
+
         lineage_color = hex_to_rgb(population.lineage_color)
         capacity = max(1.0, self.model.carrying_capacity_at(population.pos))
         fullness = min(1.0, max(0.0, population.inhabitant_count / capacity))
@@ -292,10 +332,32 @@ class InteractiveViewer:
         brightness = 1.0 - curved * (1.0 - MIN_POPULATION_BRIGHTNESS)
         return tuple(int(channel * brightness) for channel in lineage_color)
 
+    def dark_investment_color(
+        self,
+        value: float,
+        max_value: float,
+        light: Color,
+        dark: Color,
+    ) -> Color:
+        normalized = min(1.0, max(0.0, value / max_value))
+        return tuple(
+            int(light[index] + normalized * (dark[index] - light[index]))
+            for index in range(3)
+        )
+
+    def physical_split_color(self, e_econ_ratio: float) -> Color:
+        ratio = min(1.0, max(0.0, e_econ_ratio))
+        red = (225, 42, 42)
+        yellow = (250, 220, 42)
+        return tuple(
+            int(red[index] + ratio * (yellow[index] - red[index]))
+            for index in range(3)
+        )
+
     def tile_color(self, x: int, y: int) -> Color:
         if not self.model.terrain_map[y, x]:
             return WATER_COLOR
-        if not self.show_resource_overlay:
+        if self.map_mode != "resources":
             return LAND_COLOR
 
         resource = float(self.model.resource_map[y, x])
@@ -320,7 +382,7 @@ class InteractiveViewer:
             f"Lineages {int(latest['SurvivingLineages'])}",
             f"Max tech {int(latest['MaxTech'])}",
             f"Dominant {latest['DominantTrait']}",
-            f"Map {'Resources' if self.show_resource_overlay else 'Terrain'}",
+            f"Map {self.map_mode.title()}",
             f"Zoom {self.tile_size:.1f} px",
             hover_text,
         ]

@@ -43,6 +43,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Start with or render the static resource overlay.",
     )
     parser.add_argument(
+        "--map-mode",
+        choices=("terrain", "resources", "tech", "diplo", "physical"),
+        default="terrain",
+        help="Initial interactive map mode or headless render mode.",
+    )
+    parser.add_argument(
         "--window-width",
         type=int,
         default=1280,
@@ -96,6 +102,7 @@ def main() -> None:
             output_path=str(output),
             show=False,
             resource_overlay=args.resource_overlay,
+            map_mode=args.map_mode,
         )
         print_summary(model, output)
         return
@@ -105,6 +112,7 @@ def main() -> None:
             output_path=str(args.output),
             show=False,
             resource_overlay=args.resource_overlay,
+            map_mode=args.map_mode,
         )
         print_summary(model, args.output)
 
@@ -116,7 +124,7 @@ def main() -> None:
         height=args.window_height,
         fps=args.fps,
     )
-    viewer.show_resource_overlay = args.resource_overlay
+    viewer.map_mode = "resources" if args.resource_overlay else args.map_mode
     viewer.run()
     print_summary(model)
 

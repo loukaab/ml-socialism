@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from agents import Population, ResourceCell, random_traits
+from agents import Population, ResourceCell
 
 try:
     import mesa
@@ -61,6 +61,7 @@ LINEAGE_COLORS = (
 
 MIN_POPULATION_BRIGHTNESS = 0.35
 POPULATION_BRIGHTNESS_GAMMA = 0.65
+MAP_MODES = ("terrain", "resources", "tech", "diplo", "physical")
 
 
 class FallbackMultiGrid:
@@ -225,7 +226,7 @@ class WorldModel(mesa.Model):
 
         self.tech_threshold = 35.0
         self.tech_diffusion_rate = 0.35
-        self.trait_drift_rate = 0.35
+        self.trait_drift_rate = 0.01
         self.expansion_pressure_threshold = 0.68
         self.migration_fraction = 0.22
         self.minimum_migrants = 14
@@ -344,7 +345,6 @@ class WorldModel(mesa.Model):
                 stockpile=float(self.rng.uniform(35.0, 80.0)),
                 tech_level=0,
                 lineage_color=self._lineage_color(index),
-                traits=random_traits(self.rng),
             )
             self.grid.place_agent(population, pos)
             self.schedule.add(population)
@@ -433,7 +433,7 @@ class WorldModel(mesa.Model):
             stockpile=parent.stockpile * 0.20,
             tech_level=parent.tech_level,
             lineage_color=parent.lineage_color,
-            traits=parent.traits,
+            beliefs=parent.beliefs,
         )
         parent.stockpile *= 0.80
         self.grid.place_agent(child, target_pos)
@@ -468,13 +468,13 @@ class WorldModel(mesa.Model):
         return sum(population.inhabitant_count for population in self.populations)
 
     def dominant_trait(self) -> str:
-        totals = {key: 0.0 for key in ("military_pct", "economic_pct", "diplomatic_pct", "tech_pct")}
+        totals = {key: 0.0 for key in ("military", "economic", "diplomatic", "tech")}
         for population in self.populations:
             for key, value in population.traits.items():
                 totals[key] += value * population.inhabitant_count
         if not totals or sum(totals.values()) <= 0:
             return "none"
-        return max(totals, key=totals.get).replace("_pct", "")
+        return max(totals, key=totals.get)
 
     def step(self) -> None:
         self.schedule.step()
@@ -485,16 +485,22 @@ class WorldModel(mesa.Model):
         output_path: Optional[str] = None,
         show: bool = False,
         resource_overlay: bool = False,
+        map_mode: str = "terrain",
     ):
-        terrain_rgb = self.render_rgb_array(resource_overlay=resource_overlay)
+        if resource_overlay:
+            map_mode = "resources"
+        if map_mode not in MAP_MODES:
+            raise ValueError(f"Unknown map mode: {map_mode}")
+
+        terrain_rgb = self.render_rgb_array(resource_overlay=map_mode == "resources")
         for population in self.populations:
             x, y = population.pos
-            terrain_rgb[y, x] = self.population_rgb(population)
+            terrain_rgb[y, x] = self.population_rgb(population, map_mode)
 
         fig, ax = plt.subplots(figsize=(10, 7))
         ax.imshow(terrain_rgb, origin="lower")
 
-        title = "ABM World - Resource Overlay" if resource_overlay else "ABM World"
+        title = f"ABM World - {map_mode.title()} Map"
         ax.set_title(title)
         ax.set_xlabel("X")
         ax.set_ylabel("Y")
@@ -530,7 +536,24 @@ class WorldModel(mesa.Model):
         )
         return terrain_rgb
 
-    def population_rgb(self, population) -> np.ndarray:
+    def population_rgb(self, population, map_mode: str = "terrain") -> np.ndarray:
+        if map_mode == "tech":
+            return self.dark_investment_rgb(
+                population.x_tech,
+                max_value=0.3,
+                light=np.array((222, 210, 255)) / 255.0,
+                dark=np.array((44, 22, 92)) / 255.0,
+            )
+        if map_mode == "diplo":
+            return self.dark_investment_rgb(
+                population.y_dip,
+                max_value=0.3,
+                light=np.array((255, 212, 232)) / 255.0,
+                dark=np.array((95, 18, 58)) / 255.0,
+            )
+        if map_mode == "physical":
+            return self.physical_split_rgb(population.e_econ_ratio)
+
         lineage = population.lineage_color.lstrip("#")
         rgb = np.array(
             [
@@ -544,3 +567,19 @@ class WorldModel(mesa.Model):
         curved = fullness ** POPULATION_BRIGHTNESS_GAMMA
         brightness = 1.0 - curved * (1.0 - MIN_POPULATION_BRIGHTNESS)
         return rgb * brightness
+
+    def dark_investment_rgb(
+        self,
+        value: float,
+        max_value: float,
+        light: np.ndarray,
+        dark: np.ndarray,
+    ) -> np.ndarray:
+        normalized = min(1.0, max(0.0, value / max_value))
+        return light + normalized * (dark - light)
+
+    def physical_split_rgb(self, e_econ_ratio: float) -> np.ndarray:
+        ratio = min(1.0, max(0.0, e_econ_ratio))
+        red = np.array((225, 42, 42)) / 255.0
+        yellow = np.array((250, 220, 42)) / 255.0
+        return red + ratio * (yellow - red)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 
@@ -21,24 +21,35 @@ except ModuleNotFoundError:
 
 
 Position = Tuple[int, int]
-TraitMap = Dict[str, float]
-
-TRAIT_KEYS = ("military_pct", "economic_pct", "diplomatic_pct", "tech_pct")
+BeliefMap = Dict[str, float]
 
 
-def normalize_traits(traits: TraitMap) -> TraitMap:
-    """Return trait percentages normalized to exactly 100 total points."""
-    clipped = {key: max(0.0, float(traits.get(key, 0.0))) for key in TRAIT_KEYS}
-    total = sum(clipped.values())
-    if total <= 0:
-        equal_share = 100.0 / len(TRAIT_KEYS)
-        return {key: equal_share for key in TRAIT_KEYS}
-    return {key: (value / total) * 100.0 for key, value in clipped.items()}
+def random_beliefs(rng: np.random.Generator) -> BeliefMap:
+    x_tech = float(rng.uniform(0.0, 0.3))
+    y_dip = float(rng.uniform(0.0, 0.3))
+    e_econ_ratio = float(rng.uniform(0.0, 1.0))
+    return normalize_beliefs(
+        {
+            "x_tech": x_tech,
+            "y_dip": y_dip,
+            "e_econ_ratio": e_econ_ratio,
+        }
+    )
 
 
-def random_traits(rng: np.random.Generator) -> TraitMap:
-    raw = rng.dirichlet(np.ones(len(TRAIT_KEYS)))
-    return {key: float(value * 100.0) for key, value in zip(TRAIT_KEYS, raw)}
+def normalize_beliefs(beliefs: BeliefMap) -> BeliefMap:
+    x_tech = float(np.clip(beliefs.get("x_tech", 0.0), 0.0, 0.3))
+    y_dip = float(np.clip(beliefs.get("y_dip", 0.0), 0.0, 0.3))
+    if x_tech + y_dip > 1.0:
+        scale = 1.0 / (x_tech + y_dip)
+        x_tech *= scale
+        y_dip *= scale
+    return {
+        "x_tech": x_tech,
+        "y_dip": y_dip,
+        "z_physical": 1.0 - (x_tech + y_dip),
+        "e_econ_ratio": float(np.clip(beliefs.get("e_econ_ratio", 0.5), 0.0, 1.0)),
+    }
 
 
 @dataclass(frozen=True)
@@ -91,7 +102,7 @@ class Population(mesa.Agent):
         model,
         inhabitant_count: int,
         lineage_color: str,
-        traits: TraitMap,
+        beliefs: Optional[BeliefMap] = None,
         stockpile: float = 25.0,
         tech_level: int = 0,
     ) -> None:
@@ -101,11 +112,11 @@ class Population(mesa.Agent):
         self.tech_level = int(tech_level)
         self.lineage_color = lineage_color
 
-        normalized = normalize_traits(traits)
-        self.military_pct = normalized["military_pct"]
-        self.economic_pct = normalized["economic_pct"]
-        self.diplomatic_pct = normalized["diplomatic_pct"]
-        self.tech_pct = normalized["tech_pct"]
+        normalized = normalize_beliefs(beliefs or random_beliefs(model.rng))
+        self.x_tech = normalized["x_tech"]
+        self.y_dip = normalized["y_dip"]
+        self.z_physical = normalized["z_physical"]
+        self.e_econ_ratio = normalized["e_econ_ratio"]
 
         self.military_bank = 0.0
         self.economic_bank = 0.0
@@ -114,34 +125,58 @@ class Population(mesa.Agent):
         self.growth_remainder = 0.0
 
     @property
-    def traits(self) -> TraitMap:
-        return {key: getattr(self, key) for key in TRAIT_KEYS}
+    def beliefs(self) -> BeliefMap:
+        return {
+            "x_tech": self.x_tech,
+            "y_dip": self.y_dip,
+            "z_physical": self.z_physical,
+            "e_econ_ratio": self.e_econ_ratio,
+        }
 
-    def _set_traits(self, traits: TraitMap) -> None:
-        normalized = normalize_traits(traits)
-        for key, value in normalized.items():
-            setattr(self, key, value)
+    def _set_beliefs(self, beliefs: BeliefMap) -> None:
+        normalized = normalize_beliefs(beliefs)
+        self.x_tech = normalized["x_tech"]
+        self.y_dip = normalized["y_dip"]
+        self.z_physical = normalized["z_physical"]
+        self.e_econ_ratio = normalized["e_econ_ratio"]
+
+    @property
+    def traits(self) -> Dict[str, float]:
+        return self.investment_proportions
+
+    @property
+    def investment_proportions(self) -> Dict[str, float]:
+        proportions = {
+            "military": self.z_physical * (1.0 - self.e_econ_ratio),
+            "economic": self.z_physical * self.e_econ_ratio,
+            "diplomatic": self.y_dip,
+            "tech": self.x_tech,
+        }
+        total = sum(proportions.values())
+        if total <= 0:
+            return {key: 0.25 for key in proportions}
+        return {key: value / total for key, value in proportions.items()}
 
     @property
     def tech_multiplier(self) -> float:
         return 1.0 + (self.tech_level * 0.05)
 
     def military_output(self) -> float:
-        return self.military_pct * self.tech_multiplier
+        return self.investment_proportions["military"] * 100.0 * self.tech_multiplier
 
     def economic_output(self) -> float:
-        return self.economic_pct * self.tech_multiplier
+        return self.investment_proportions["economic"] * 100.0 * self.tech_multiplier
 
     def diplomatic_output(self) -> float:
-        return self.diplomatic_pct * self.tech_multiplier
+        return self.investment_proportions["diplomatic"] * 100.0 * self.tech_multiplier
 
     def allocate(self, harvested: float) -> Allocation:
-        normalized = self.traits
+        investments = self.investment_proportions
         allocation = Allocation(
-            military=harvested * normalized["military_pct"] / 100.0,
-            economic=harvested * normalized["economic_pct"] / 100.0,
-            diplomatic=harvested * normalized["diplomatic_pct"] / 100.0,
-            tech=harvested * normalized["tech_pct"] / 100.0,
+            military=harvested * investments["military"],
+            economic=harvested * investments["economic"],
+            diplomatic=harvested * investments["diplomatic"],
+            tech=harvested * investments["tech"],
         )
         self.military_bank += allocation.military
         self.economic_bank += allocation.economic
@@ -174,9 +209,13 @@ class Population(mesa.Agent):
             self.tech_bank += gap * self.model.tech_diffusion_rate
 
     def drift_traits(self) -> None:
-        drift = self.model.rng.normal(0.0, self.model.trait_drift_rate, len(TRAIT_KEYS))
-        self._set_traits(
-            {key: value + delta for (key, value), delta in zip(self.traits.items(), drift)}
+        drift = self.model.rng.normal(0.0, self.model.trait_drift_rate, 3)
+        self._set_beliefs(
+            {
+                "x_tech": self.x_tech + drift[0],
+                "y_dip": self.y_dip + drift[1],
+                "e_econ_ratio": self.e_econ_ratio + drift[2],
+            }
         )
 
     def trade_with_neighbors(self) -> None:
