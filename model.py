@@ -223,6 +223,8 @@ class WorldModel(mesa.Model):
         self._next_id = 1
         self.resource_cells: Dict[Position, ResourceCell] = {}
         self.expansion_events = 0
+        self.attack_events = 0
+        self.conquest_events = 0
 
         self.tech_threshold = 35.0
         self.tech_diffusion_rate = 0.35
@@ -231,6 +233,7 @@ class WorldModel(mesa.Model):
         self.migration_fraction = 0.22
         self.minimum_migrants = 14
         self.population_growth_rate = 0.085
+        self.attack_scale_constant = 0.05
 
         self.terrain_map = self._generate_terrain()
         self.resource_map = self._generate_resource_map()
@@ -247,6 +250,8 @@ class WorldModel(mesa.Model):
                 "TotalInhabitants": lambda model: model.total_inhabitants(),
                 "OccupiedTiles": lambda model: len(model.populations),
                 "ExpansionEvents": lambda model: model.expansion_events,
+                "AttackEvents": lambda model: model.attack_events,
+                "ConquestEvents": lambda model: model.conquest_events,
             },
             agent_reporters={
                 "Inhabitants": lambda agent: getattr(agent, "inhabitant_count", None),

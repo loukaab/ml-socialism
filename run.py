@@ -79,6 +79,8 @@ def print_summary(model: WorldModel, output: Optional[Path] = None) -> None:
     print(f"Occupied tiles: {latest['OccupiedTiles']}")
     print(f"Total inhabitants: {latest['TotalInhabitants']}")
     print(f"Expansion events: {latest['ExpansionEvents']}")
+    print(f"Attack events: {latest['AttackEvents']}")
+    print(f"Conquest events: {latest['ConquestEvents']}")
     print(f"Surviving lineages: {latest['SurvivingLineages']}")
     print(f"Max tech level: {latest['MaxTech']}")
     print(f"Dominant trait: {latest['DominantTrait']}")

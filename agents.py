@@ -60,6 +60,16 @@ class Allocation:
     tech: float
 
 
+@dataclass(frozen=True)
+class AttackPlan:
+    target: "Population"
+    defender_power: float
+    optimal_force: float
+    actual_force: int
+    actual_win_prob: float
+    attack_chance: float
+
+
 class ResourceCell(mesa.Agent):
     """Static environmental agent representing land or water on a map tile."""
 
@@ -162,13 +172,13 @@ class Population(mesa.Agent):
         return 1.0 + (self.tech_level * 0.05)
 
     def military_output(self) -> float:
-        return self.investment_proportions["military"] * 100.0 * self.tech_multiplier
+        return self.investment_proportions["military"] * self.tech_multiplier
 
     def economic_output(self) -> float:
-        return self.investment_proportions["economic"] * 100.0 * self.tech_multiplier
+        return self.investment_proportions["economic"] * self.tech_multiplier
 
     def diplomatic_output(self) -> float:
-        return self.investment_proportions["diplomatic"] * 100.0 * self.tech_multiplier
+        return self.investment_proportions["diplomatic"] * self.tech_multiplier
 
     def allocate(self, harvested: float) -> Allocation:
         investments = self.investment_proportions
@@ -189,7 +199,7 @@ class Population(mesa.Agent):
         cell = self.model.resource_cell_at(self.pos)
         if cell is None:
             return 0.0
-        return cell.resource_value * (1.0 + self.economic_output() / 200.0)
+        return cell.resource_value * (1.0 + self.economic_output())
 
     def advance_tech(self) -> None:
         threshold = self.model.tech_threshold * (1.0 + self.tech_level * 0.35)
@@ -224,12 +234,98 @@ class Population(mesa.Agent):
                 continue
 
             diplomatic_delta = self.diplomatic_output() - neighbor.diplomatic_output()
-            perceived_bonus = min(0.20, max(0.0, diplomatic_delta / 500.0))
+            perceived_bonus = min(0.20, max(0.0, diplomatic_delta * 0.2))
             trade_amount = min(self.stockpile, neighbor.stockpile, 2.0)
 
             if trade_amount * (1.0 + perceived_bonus) >= trade_amount * 0.95:
                 self.stockpile += trade_amount * perceived_bonus
                 neighbor.stockpile += trade_amount * 0.02
+
+    def bordering_enemy_populations(self) -> list["Population"]:
+        return [
+            neighbor
+            for neighbor in self.model.populations_near(self.pos)
+            if neighbor.lineage_color != self.lineage_color
+        ]
+
+    def plan_attack(self, target: "Population") -> Optional[AttackPlan]:
+        defender_power = target.inhabitant_count * target.military_output()
+        if self.military_output() > 0:
+            optimal_force = 4.0 * (defender_power / self.military_output())
+        else:
+            optimal_force = float("inf")
+
+        max_force = min(float(self.inhabitant_count) * 0.8, float(self.inhabitant_count - 1))
+        if max_force < 1.0:
+            return None
+
+        actual_force_float = min(optimal_force, max_force)
+        actual_force = max(1, int(actual_force_float))
+        actual_attacker_power = actual_force * self.military_output()
+        total_power = actual_attacker_power + defender_power
+        if total_power > 0:
+            actual_win_prob = actual_attacker_power / total_power
+        else:
+            actual_win_prob = 0.0
+
+        dip_factor = max(
+            0.1,
+            target.diplomatic_output() - self.diplomatic_output() + 1.0,
+        )
+        carrying_capacity = max(1.0, self.model.carrying_capacity_at(self.pos))
+        pop_pressure = self.inhabitant_count / carrying_capacity
+        attack_chance = min(
+            1.0,
+            max(
+                0.0,
+                (actual_win_prob / dip_factor)
+                * pop_pressure
+                * self.model.attack_scale_constant,
+            ),
+        )
+        return AttackPlan(
+            target=target,
+            defender_power=defender_power,
+            optimal_force=optimal_force,
+            actual_force=actual_force,
+            actual_win_prob=actual_win_prob,
+            attack_chance=attack_chance,
+        )
+
+    def maybe_attack_neighbor(self) -> bool:
+        plans = [
+            plan
+            for enemy in self.bordering_enemy_populations()
+            if (plan := self.plan_attack(enemy)) is not None
+        ]
+        if not plans:
+            return False
+
+        plans.sort(
+            key=lambda plan: (plan.attack_chance, plan.actual_win_prob),
+            reverse=True,
+        )
+        plan = plans[0]
+        if self.model.rng.random() >= plan.attack_chance:
+            return False
+
+        self.inhabitant_count -= plan.actual_force
+        if self.inhabitant_count < 1:
+            self.inhabitant_count = 1
+        self.model.attack_events += 1
+
+        if self.model.rng.random() < plan.actual_win_prob:
+            target = plan.target
+            assimilation_rate = min(1.25 * self.diplomatic_output(), 1.0)
+            assimilated = int(target.inhabitant_count * assimilation_rate)
+            target.lineage_color = self.lineage_color
+            target._set_beliefs(self.beliefs)
+            target.tech_level = self.tech_level
+            target.inhabitant_count = max(1, plan.actual_force + assimilated)
+            target.growth_remainder = 0.0
+            self.model.conquest_events += 1
+            return True
+        return False
 
     def expand_or_migrate(self) -> None:
         capacity = self.model.carrying_capacity_at(self.pos)
@@ -259,7 +355,7 @@ class Population(mesa.Agent):
         if capacity <= 0:
             return
 
-        economic_bonus = 1.0 + (self.economic_output() / 250.0)
+        economic_bonus = 1.0 + (self.economic_output() * 0.05)
         growth_rate = self.model.population_growth_rate * economic_bonus
         population = float(self.inhabitant_count)
         delta = growth_rate * population * (1.0 - population / capacity)
@@ -275,4 +371,5 @@ class Population(mesa.Agent):
         self.trade_with_neighbors()
         self.grow_logistically()
         self.drift_traits()
+        self.maybe_attack_neighbor()
         self.expand_or_migrate()

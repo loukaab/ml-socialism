@@ -19,9 +19,14 @@ HIGH_RESOURCE_COLOR: Color = (250, 214, 56)
 TEXT_COLOR: Color = (235, 238, 242)
 PANEL_COLOR: Color = (20, 24, 31)
 PANEL_BORDER: Color = (75, 84, 99)
+SLIDER_TRACK_COLOR: Color = (72, 79, 92)
+SLIDER_FILL_COLOR: Color = (211, 217, 225)
+SLIDER_KNOB_COLOR: Color = (255, 255, 255)
 MIN_POPULATION_BRIGHTNESS = 0.35
 POPULATION_BRIGHTNESS_GAMMA = 0.65
 MAP_MODES = ("terrain", "resources", "tech", "diplo", "physical")
+MIN_STEPS_PER_SECOND = 1.0
+MAX_STEPS_PER_SECOND = 30.0
 
 
 def hex_to_rgb(value: str) -> Color:
@@ -57,6 +62,7 @@ class InteractiveViewer:
         self.camera_x = 0.0
         self.camera_y = 0.0
         self.dragging = False
+        self.slider_dragging = False
         self.last_mouse_pos: Optional[Tuple[int, int]] = None
         self.running = True
         self.playing = False
@@ -102,9 +108,13 @@ class InteractiveViewer:
             elif event.type == pygame.MOUSEBUTTONUP:
                 if event.button in (1, 2, 3):
                     self.dragging = False
+                    self.slider_dragging = False
                     self.last_mouse_pos = None
-            elif event.type == pygame.MOUSEMOTION and self.dragging:
-                self.pan_to(event.pos)
+            elif event.type == pygame.MOUSEMOTION:
+                if self.slider_dragging:
+                    self.update_slider_from_mouse(event.pos)
+                elif self.dragging:
+                    self.pan_to(event.pos)
             elif event.type == pygame.MOUSEWHEEL:
                 self.zoom_at(pygame.mouse.get_pos(), 1.12 if event.y > 0 else 1 / 1.12)
 
@@ -148,6 +158,12 @@ class InteractiveViewer:
 
     def handle_mouse_down(self, event) -> None:
         if event.button in (1, 2, 3):
+            if self.slider_rect().collidepoint(event.pos):
+                self.slider_dragging = True
+                self.dragging = False
+                self.last_mouse_pos = None
+                self.update_slider_from_mouse(event.pos)
+                return
             self.dragging = True
             self.last_mouse_pos = event.pos
         elif event.button == 4:
@@ -225,6 +241,7 @@ class InteractiveViewer:
                 pygame.draw.rect(self.screen, color, rect)
 
         self.draw_owned_tiles()
+        self.draw_lineage_borders(start_x, start_y, end_x, end_y)
         self.draw_hover_population_label()
         if self.tile_size >= 14:
             self.draw_grid(start_x, start_y, end_x, end_y)
@@ -261,6 +278,66 @@ class InteractiveViewer:
                 tile,
             )
             pygame.draw.rect(self.screen, color, rect)
+
+    def draw_lineage_borders(
+        self,
+        start_x: int,
+        start_y: int,
+        end_x: int,
+        end_y: int,
+    ) -> None:
+        thickness = max(2, min(6, int(self.tile_size * 0.16)))
+        for y in range(start_y, end_y):
+            for x in range(start_x, end_x):
+                population = self.model.population_at((x, y))
+                if population is None:
+                    continue
+
+                left = int(self.camera_x + x * self.tile_size)
+                top = int(self.camera_y + y * self.tile_size)
+                right = int(self.camera_x + (x + 1) * self.tile_size)
+                bottom = int(self.camera_y + (y + 1) * self.tile_size)
+
+                if self.has_border(population, x - 1, y):
+                    pygame.draw.line(
+                        self.screen,
+                        (0, 0, 0),
+                        (left, top),
+                        (left, bottom),
+                        thickness,
+                    )
+                if self.has_border(population, x + 1, y):
+                    pygame.draw.line(
+                        self.screen,
+                        (0, 0, 0),
+                        (right, top),
+                        (right, bottom),
+                        thickness,
+                    )
+                if self.has_border(population, x, y - 1):
+                    pygame.draw.line(
+                        self.screen,
+                        (0, 0, 0),
+                        (left, top),
+                        (right, top),
+                        thickness,
+                    )
+                if self.has_border(population, x, y + 1):
+                    pygame.draw.line(
+                        self.screen,
+                        (0, 0, 0),
+                        (left, bottom),
+                        (right, bottom),
+                        thickness,
+                    )
+
+    def has_border(self, population, neighbor_x: int, neighbor_y: int) -> bool:
+        if not (0 <= neighbor_x < self.model.width and 0 <= neighbor_y < self.model.height):
+            return True
+        neighbor = self.model.population_at((neighbor_x, neighbor_y))
+        if neighbor is None:
+            return True
+        return neighbor.lineage_color != population.lineage_color
 
     def draw_hover_population_label(self) -> None:
         if self.tile_size < 12:
@@ -370,25 +447,10 @@ class InteractiveViewer:
         )
 
     def draw_status_panel(self) -> None:
-        latest = self.model.datacollector.get_model_vars_dataframe().iloc[-1]
-        hover_text = self.hover_text()
-        rows = [
-            f"Step {int(latest['Step'])}",
-            f"{'Playing' if self.playing else 'Paused'}",
-            f"Populations {int(latest['PopulationAgents'])}",
-            f"Occupied {int(latest['OccupiedTiles'])}",
-            f"Inhabitants {int(latest['TotalInhabitants'])}",
-            f"Expansions {int(latest['ExpansionEvents'])}",
-            f"Lineages {int(latest['SurvivingLineages'])}",
-            f"Max tech {int(latest['MaxTech'])}",
-            f"Dominant {latest['DominantTrait']}",
-            f"Map {self.map_mode.title()}",
-            f"Zoom {self.tile_size:.1f} px",
-            hover_text,
-        ]
+        rows = self.status_rows()
 
-        width = 190
-        height = 12 + len(rows) * 24
+        width = 220
+        height = 20 + len(rows) * 24 + 36
         panel = pygame.Rect(14, 14, width, height)
         pygame.draw.rect(self.screen, PANEL_COLOR, panel, border_radius=6)
         pygame.draw.rect(self.screen, PANEL_BORDER, panel, width=1, border_radius=6)
@@ -396,6 +458,59 @@ class InteractiveViewer:
         for index, row in enumerate(rows):
             surface = self.font.render(row, True, TEXT_COLOR)
             self.screen.blit(surface, (26, 24 + index * 24))
+
+        self.draw_slider()
+
+    def slider_rect(self) -> pygame.Rect:
+        row_count = len(self.status_rows())
+        return pygame.Rect(26, 24 + row_count * 24 + 8, 170, 8)
+
+    def status_rows(self) -> list[str]:
+        latest = self.model.datacollector.get_model_vars_dataframe().iloc[-1]
+        hover_text = self.hover_text()
+        return [
+            f"Step {int(latest['Step'])}",
+            f"{'Playing' if self.playing else 'Paused'}",
+            f"Populations {int(latest['PopulationAgents'])}",
+            f"Occupied {int(latest['OccupiedTiles'])}",
+            f"Inhabitants {int(latest['TotalInhabitants'])}",
+            f"Expansions {int(latest['ExpansionEvents'])}",
+            f"Attacks {int(latest['AttackEvents'])}",
+            f"Conquests {int(latest['ConquestEvents'])}",
+            f"Lineages {int(latest['SurvivingLineages'])}",
+            f"Max tech {int(latest['MaxTech'])}",
+            f"Dominant {latest['DominantTrait']}",
+            f"Map {self.map_mode.title()}",
+            f"Timestep {self.steps_per_second:.1f}/s",
+            f"Zoom {self.tile_size:.1f} px",
+            hover_text,
+        ]
+
+    def draw_slider(self) -> None:
+        rect = self.slider_rect()
+        pygame.draw.rect(self.screen, SLIDER_TRACK_COLOR, rect, border_radius=4)
+
+        normalized = (self.steps_per_second - MIN_STEPS_PER_SECOND) / (
+            MAX_STEPS_PER_SECOND - MIN_STEPS_PER_SECOND
+        )
+        normalized = min(1.0, max(0.0, normalized))
+        fill_width = max(6, int(rect.width * normalized))
+        fill_rect = pygame.Rect(rect.x, rect.y, fill_width, rect.height)
+        pygame.draw.rect(self.screen, SLIDER_FILL_COLOR, fill_rect, border_radius=4)
+
+        knob_x = rect.x + int(rect.width * normalized)
+        knob_center = (knob_x, rect.y + rect.height // 2)
+        pygame.draw.circle(self.screen, SLIDER_KNOB_COLOR, knob_center, 7)
+        pygame.draw.circle(self.screen, (0, 0, 0), knob_center, 7, 1)
+
+    def update_slider_from_mouse(self, mouse_pos: Tuple[int, int]) -> None:
+        rect = self.slider_rect()
+        normalized = (mouse_pos[0] - rect.x) / rect.width
+        normalized = min(1.0, max(0.0, normalized))
+        self.steps_per_second = (
+            MIN_STEPS_PER_SECOND
+            + normalized * (MAX_STEPS_PER_SECOND - MIN_STEPS_PER_SECOND)
+        )
 
     def hover_text(self) -> str:
         tile_pos = self.screen_to_tile(pygame.mouse.get_pos())
