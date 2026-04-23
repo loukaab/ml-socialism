@@ -309,6 +309,7 @@ class Population(mesa.Agent):
         if self.model.rng.random() >= plan.attack_chance:
             return False
 
+        self.model.register_attack_arrow(self.pos, plan.target.pos)
         self.inhabitant_count -= plan.actual_force
         if self.inhabitant_count < 1:
             self.inhabitant_count = 1

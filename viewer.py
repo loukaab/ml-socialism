@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Optional, Tuple
 
 import pygame
@@ -242,6 +243,7 @@ class InteractiveViewer:
 
         self.draw_owned_tiles()
         self.draw_lineage_borders(start_x, start_y, end_x, end_y)
+        self.draw_attack_arrows()
         self.draw_hover_population_label()
         if self.tile_size >= 14:
             self.draw_grid(start_x, start_y, end_x, end_y)
@@ -339,6 +341,60 @@ class InteractiveViewer:
         if neighbor is None:
             return True
         return neighbor.lineage_color != population.lineage_color
+
+    def draw_attack_arrows(self) -> None:
+        for arrow in self.model.attack_arrows:
+            start = self.tile_center(arrow.source)
+            end = self.tile_center(arrow.target)
+            self.draw_arrow(start, end)
+
+    def tile_center(self, pos: Tuple[int, int]) -> Tuple[int, int]:
+        x, y = pos
+        return (
+            int(self.camera_x + (x + 0.5) * self.tile_size),
+            int(self.camera_y + (y + 0.5) * self.tile_size),
+        )
+
+    def draw_arrow(self, start: Tuple[int, int], end: Tuple[int, int]) -> None:
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        distance = math.hypot(dx, dy)
+        if distance < 1:
+            return
+
+        ux = dx / distance
+        uy = dy / distance
+        arrowhead_length = max(8.0, self.tile_size * 0.45)
+        arrowhead_width = max(5.0, self.tile_size * 0.22)
+        shaft_end = (
+            int(end[0] - ux * arrowhead_length * 0.75),
+            int(end[1] - uy * arrowhead_length * 0.75),
+        )
+        line_width = max(3, min(8, int(self.tile_size * 0.16)))
+
+        pygame.draw.line(self.screen, (0, 0, 0), start, shaft_end, line_width + 2)
+        pygame.draw.line(self.screen, (220, 36, 36), start, shaft_end, line_width)
+
+        perp_x = -uy
+        perp_y = ux
+        left = (
+            int(end[0] - ux * arrowhead_length + perp_x * arrowhead_width),
+            int(end[1] - uy * arrowhead_length + perp_y * arrowhead_width),
+        )
+        right = (
+            int(end[0] - ux * arrowhead_length - perp_x * arrowhead_width),
+            int(end[1] - uy * arrowhead_length - perp_y * arrowhead_width),
+        )
+        pygame.draw.polygon(self.screen, (0, 0, 0), [end, left, right])
+        inset_left = (
+            int(end[0] - ux * (arrowhead_length - 2) + perp_x * (arrowhead_width - 1)),
+            int(end[1] - uy * (arrowhead_length - 2) + perp_y * (arrowhead_width - 1)),
+        )
+        inset_right = (
+            int(end[0] - ux * (arrowhead_length - 2) - perp_x * (arrowhead_width - 1)),
+            int(end[1] - uy * (arrowhead_length - 2) - perp_y * (arrowhead_width - 1)),
+        )
+        pygame.draw.polygon(self.screen, (220, 36, 36), [end, inset_left, inset_right])
 
     def draw_hover_population_label(self) -> None:
         if self.tile_size < 12:

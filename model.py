@@ -199,6 +199,13 @@ class TerrainConfig:
     carrying_capacity_max: float = 520.0
 
 
+@dataclass
+class AttackArrow:
+    source: Position
+    target: Position
+    remaining_steps: int = 3
+
+
 class WorldModel(mesa.Model):
     """Localized capitalist baseline world for the phase-1 ABM."""
 
@@ -225,6 +232,8 @@ class WorldModel(mesa.Model):
         self.expansion_events = 0
         self.attack_events = 0
         self.conquest_events = 0
+        self.attack_arrows: List[AttackArrow] = []
+        self._pending_attack_arrows: List[Tuple[Position, Position]] = []
 
         self.tech_threshold = 35.0
         self.tech_diffusion_rate = 0.35
@@ -482,8 +491,28 @@ class WorldModel(mesa.Model):
         return max(totals, key=totals.get)
 
     def step(self) -> None:
+        self._age_attack_arrows()
         self.schedule.step()
+        self._flush_pending_attack_arrows()
         self.datacollector.collect(self)
+
+    def register_attack_arrow(self, source: Position, target: Position) -> None:
+        self._pending_attack_arrows.append((source, target))
+
+    def _flush_pending_attack_arrows(self) -> None:
+        for source, target in self._pending_attack_arrows:
+            self.attack_arrows.append(
+                AttackArrow(source=source, target=target, remaining_steps=3)
+            )
+        self._pending_attack_arrows.clear()
+
+    def _age_attack_arrows(self) -> None:
+        survivors: List[AttackArrow] = []
+        for arrow in self.attack_arrows:
+            arrow.remaining_steps -= 1
+            if arrow.remaining_steps > 0:
+                survivors.append(arrow)
+        self.attack_arrows = survivors
 
     def render_map(
         self,
