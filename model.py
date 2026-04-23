@@ -498,9 +498,14 @@ class WorldModel(mesa.Model):
             raise ValueError(f"Unknown map mode: {map_mode}")
 
         terrain_rgb = self.render_rgb_array(resource_overlay=map_mode == "resources")
+        global_max_population = self.global_max_population()
         for population in self.populations:
             x, y = population.pos
-            terrain_rgb[y, x] = self.population_rgb(population, map_mode)
+            terrain_rgb[y, x] = self.population_rgb(
+                population,
+                map_mode=map_mode,
+                global_max_population=global_max_population,
+            )
 
         fig, ax = plt.subplots(figsize=(10, 7))
         ax.imshow(terrain_rgb, origin="lower")
@@ -541,7 +546,15 @@ class WorldModel(mesa.Model):
         )
         return terrain_rgb
 
-    def population_rgb(self, population, map_mode: str = "terrain") -> np.ndarray:
+    def global_max_population(self) -> int:
+        return max((population.inhabitant_count for population in self.populations), default=1)
+
+    def population_rgb(
+        self,
+        population,
+        map_mode: str = "terrain",
+        global_max_population: Optional[int] = None,
+    ) -> np.ndarray:
         if map_mode == "tech":
             return self.dark_investment_rgb(
                 population.x_tech,
@@ -567,9 +580,13 @@ class WorldModel(mesa.Model):
                 int(lineage[4:6], 16) / 255.0,
             ]
         )
-        capacity = max(1.0, self.carrying_capacity_at(population.pos))
-        fullness = min(1.0, max(0.0, population.inhabitant_count / capacity))
-        curved = fullness ** POPULATION_BRIGHTNESS_GAMMA
+        max_population = max(1, global_max_population or self.global_max_population())
+        if max_population <= 1:
+            normalized = 0.0
+        else:
+            normalized = (population.inhabitant_count - 1) / (max_population - 1)
+        normalized = min(1.0, max(0.0, normalized))
+        curved = normalized ** POPULATION_BRIGHTNESS_GAMMA
         brightness = 1.0 - curved * (1.0 - MIN_POPULATION_BRIGHTNESS)
         return rgb * brightness
 

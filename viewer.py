@@ -268,9 +268,10 @@ class InteractiveViewer:
 
     def draw_owned_tiles(self) -> None:
         tile = max(1, int(self.tile_size + 1))
+        global_max_population = self.model.global_max_population()
         for population in self.model.populations:
             x, y = population.pos
-            color = self.population_tile_color(population)
+            color = self.population_tile_color(population, global_max_population)
             rect = pygame.Rect(
                 int(self.camera_x + x * self.tile_size),
                 int(self.camera_y + y * self.tile_size),
@@ -384,7 +385,7 @@ class InteractiveViewer:
         height = max(1, int(label.get_height() * scale))
         return pygame.transform.smoothscale(label, (width, height))
 
-    def population_tile_color(self, population) -> Color:
+    def population_tile_color(self, population, global_max_population: Optional[int] = None) -> Color:
         if self.map_mode == "tech":
             return self.dark_investment_color(
                 population.x_tech,
@@ -403,9 +404,13 @@ class InteractiveViewer:
             return self.physical_split_color(population.e_econ_ratio)
 
         lineage_color = hex_to_rgb(population.lineage_color)
-        capacity = max(1.0, self.model.carrying_capacity_at(population.pos))
-        fullness = min(1.0, max(0.0, population.inhabitant_count / capacity))
-        curved = fullness ** POPULATION_BRIGHTNESS_GAMMA
+        max_population = max(1, global_max_population or self.model.global_max_population())
+        if max_population <= 1:
+            normalized = 0.0
+        else:
+            normalized = (population.inhabitant_count - 1) / (max_population - 1)
+        normalized = min(1.0, max(0.0, normalized))
+        curved = normalized ** POPULATION_BRIGHTNESS_GAMMA
         brightness = 1.0 - curved * (1.0 - MIN_POPULATION_BRIGHTNESS)
         return tuple(int(channel * brightness) for channel in lineage_color)
 
