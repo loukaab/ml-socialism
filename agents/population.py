@@ -111,6 +111,8 @@ class ResourceCell(mesa.Agent):
         self.carrying_capacity = float(carrying_capacity)
         self.raw_goods_stockpile = 0.0
         self.manufactory_level = 0
+        self.devastation = 0.0
+        self.steps_since_conflict = 0
         self.reset_tick_production()
 
     @property
@@ -132,6 +134,37 @@ class ResourceCell(mesa.Agent):
         self.last_new_inhabitants = 0
         self.last_raw_extracted = 0.0
         self.last_refined_produced = 0.0
+
+    @property
+    def production_multiplier(self) -> float:
+        max_devastation = self.model.economy_config.devastation_max
+        if max_devastation <= 0:
+            return 1.0
+        return max(0.0, 1.0 - self.devastation / max_devastation)
+
+    def clamp_devastation(self) -> None:
+        max_devastation = self.model.economy_config.devastation_max
+        self.devastation = min(max_devastation, max(0.0, float(self.devastation)))
+
+    def add_devastation(self, amount: float) -> None:
+        if amount <= 0:
+            return
+        self.devastation += amount
+        self.clamp_devastation()
+        self.steps_since_conflict = 0
+
+    def recover_devastation(self) -> None:
+        config = self.model.economy_config
+        if not self.is_land or self.devastation <= 0:
+            self.steps_since_conflict = 0
+            return
+        period = max(1, int(config.devastation_recovery_period))
+        self.steps_since_conflict += 1
+        if self.steps_since_conflict < period:
+            return
+        self.devastation -= config.devastation_recovery_amount
+        self.clamp_devastation()
+        self.steps_since_conflict = 0
 
     def harvest(self, amount: float) -> float:
         if not self.is_land or amount <= 0:
@@ -334,7 +367,7 @@ class Population(mesa.Agent):
 
         config = self.model.economy_config
         jobs = self.allocate_jobs()
-        multiplier = self.tech_multiplier
+        multiplier = self.tech_multiplier * cell.production_multiplier
 
         food_produced = jobs.farmers * config.food_per_farmer * multiplier
         raw_extracted = jobs.extractors * config.raw_per_extractor * multiplier
@@ -610,6 +643,10 @@ class Population(mesa.Agent):
                 new_tech_level=self.tech_level,
             )
             return True
+        self.model.add_tile_devastation(
+            plan.target.pos,
+            self.model.economy_config.devastation_failed_attack_increase,
+        )
         return False
 
     def combat_refined_cost(self) -> float:

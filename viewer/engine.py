@@ -21,6 +21,8 @@ LOW_RAW_COLOR: Color = (97, 69, 31)
 HIGH_RAW_COLOR: Color = (250, 214, 56)
 LOW_FACTORY_COLOR: Color = (56, 74, 82)
 HIGH_FACTORY_COLOR: Color = (97, 214, 224)
+LOW_DEVASTATION_COLOR: Color = (61, 115, 66)
+HIGH_DEVASTATION_COLOR: Color = (204, 31, 26)
 TEXT_COLOR: Color = (235, 238, 242)
 PANEL_COLOR: Color = (20, 24, 31)
 PANEL_BORDER: Color = (75, 84, 99)
@@ -47,6 +49,7 @@ MAP_MODE_LABELS = {
     "arable": "Arable Land",
     "raw": "Raw Goods",
     "manufactories": "Manufactories",
+    "devastation": "Devastation",
     "tech": "Technology",
     "diplo": "Diplomacy",
     "physical": "Physical",
@@ -59,6 +62,7 @@ MAP_MODE_HOTKEYS = {
     "tech": "5",
     "diplo": "6",
     "physical": "7",
+    "devastation": "8",
 }
 
 
@@ -206,6 +210,8 @@ class InteractiveViewer:
             self.map_mode = "diplo"
         elif key in (pygame.K_7, pygame.K_KP7):
             self.map_mode = "physical"
+        elif key in (pygame.K_8, pygame.K_KP8):
+            self.map_mode = "devastation"
         elif key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
             self.zoom_at(self.screen_center(), 1.12)
         elif key in (pygame.K_MINUS, pygame.K_KP_MINUS):
@@ -533,6 +539,17 @@ class InteractiveViewer:
             pygame.draw.lines(self.screen, HIGH_FACTORY_COLOR, False, roof, 3)
             pygame.draw.rect(self.screen, color, pygame.Rect(rect.x + 13, rect.y + 21, 4, 4))
             pygame.draw.rect(self.screen, color, pygame.Rect(rect.x + 22, rect.y + 21, 4, 4))
+        elif mode == "devastation":
+            flame = [
+                (center[0], rect.y + 9),
+                (rect.x + 27, rect.y + 21),
+                (center[0] + 6, rect.y + 30),
+                (center[0], rect.y + 25),
+                (center[0] - 6, rect.y + 30),
+                (rect.x + 11, rect.y + 21),
+            ]
+            pygame.draw.polygon(self.screen, HIGH_DEVASTATION_COLOR, flame)
+            pygame.draw.polygon(self.screen, (255, 176, 77), [(center[0], rect.y + 17), (center[0] + 4, rect.y + 26), (center[0] - 4, rect.y + 26)])
         elif mode == "tech":
             nodes = [(center[0], rect.y + 11), (rect.x + 12, rect.y + 26), (rect.x + 27, rect.y + 26)]
             pygame.draw.lines(self.screen, color, True, nodes, 2)
@@ -725,7 +742,8 @@ class InteractiveViewer:
                 f"ref {self.format_stat_value(row['refined_produced'], 'float')}  "
                 f"births {self.format_stat_value(row['births'], 'int')}  "
                 f"mfg {self.format_stat_value(row['manufactories'], 'int')}  "
-                f"tech {self.format_stat_value(row['avg_tech'], 'float')}/{self.format_stat_value(row['max_tech'], 'int')}"
+                f"tech {self.format_stat_value(row['avg_tech'], 'float')}/{self.format_stat_value(row['max_tech'], 'int')}  "
+                f"dev {self.format_stat_value(row['avg_devastation'], 'float')}/{self.format_stat_value(row['max_devastation'], 'float')}"
             )
             self.blit_clipped(detail, self.small_font, MUTED_TEXT_COLOR, pygame.Rect(origin_x, y, rect.width - 18, 18))
             y += 26
@@ -1282,6 +1300,10 @@ class InteractiveViewer:
             cell = self.model.resource_cell_at((x, y))
             value = 0.0 if cell is None or cell.manufactory_level <= 0 else 1.0
             return lerp_color(LOW_FACTORY_COLOR, HIGH_FACTORY_COLOR, value)
+        if mode == "devastation":
+            max_devastation = max(1e-9, self.model.economy_config.devastation_max)
+            value = self.model.devastation_at((x, y)) / max_devastation
+            return lerp_color(LOW_DEVASTATION_COLOR, HIGH_DEVASTATION_COLOR, value)
         return LAND_COLOR
 
     def draw_status_panel(self) -> None:
@@ -1363,10 +1385,14 @@ class InteractiveViewer:
         if population is None:
             if cell is None:
                 return f"Hover {tile_pos}: empty"
-            return f"Hover {tile_pos}: A{cell.arable_value:.2f} R{cell.raw_goods_value:.2f}"
+            return (
+                f"Hover {tile_pos}: A{cell.arable_value:.2f} "
+                f"R{cell.raw_goods_value:.2f} D{cell.devastation:.1f}"
+            )
         return (
             f"Hover {tile_pos}: {population.inhabitant_count} "
-            f"F{population.last_farmers} M{population.last_manufacturers}"
+            f"F{population.last_farmers} M{population.last_manufacturers} "
+            f"D{cell.devastation:.1f}"
         )
 
     def screen_to_tile(self, screen_pos: Tuple[int, int]) -> Optional[Tuple[int, int]]:

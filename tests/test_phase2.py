@@ -19,6 +19,16 @@ from viewer.engine import InteractiveViewer
 FIXED_BELIEFS = {"x_tech": 0.1, "y_dip": 0.1, "e_econ_ratio": 0.5}
 
 
+class FixedRandom:
+    def __init__(self, values):
+        self.values = list(values)
+
+    def random(self):
+        if not self.values:
+            return 0.0
+        return self.values.pop(0)
+
+
 def force_land(model: WorldModel, pos, arable: float = 1.0, raw: float = 1.0):
     x, y = pos
     model.terrain_map[y, x] = True
@@ -357,6 +367,42 @@ class Phase2MacroeconomicsTests(unittest.TestCase):
         self.assertAlmostEqual(nation_b.food_stockpile, 12.0)
         self.assertAlmostEqual(nation_b.refined_stockpile, 8.0)
 
+    def test_conquest_adds_devastation_and_can_destroy_manufactory(self):
+        model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
+        attacker_pos = (1, 1)
+        defender_pos = (2, 1)
+        force_land(model, attacker_pos)
+        defender_cell = force_land(model, defender_pos)
+        defender_cell.manufactory_level = 1
+        attacker_nation = model.create_nation("#e83f6f", attacker_pos)
+        defender_nation = model.create_nation("#a855f7", defender_pos)
+        attacker = add_population(model, attacker_pos, count=50, nation=attacker_nation)
+        defender = add_population(model, defender_pos, count=20, nation=defender_nation)
+        model.rng = FixedRandom([0.0])
+
+        model.handle_conquest(attacker, defender, 25, attacker.beliefs, attacker.tech_level)
+
+        self.assertAlmostEqual(defender_cell.devastation, 1.0)
+        self.assertEqual(defender_cell.steps_since_conflict, 0)
+        self.assertEqual(defender_cell.manufactory_level, 0)
+
+    def test_conquest_preserves_manufactory_when_roll_is_high(self):
+        model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
+        attacker_pos = (1, 1)
+        defender_pos = (2, 1)
+        force_land(model, attacker_pos)
+        defender_cell = force_land(model, defender_pos)
+        defender_cell.manufactory_level = 1
+        attacker_nation = model.create_nation("#e83f6f", attacker_pos)
+        defender_nation = model.create_nation("#a855f7", defender_pos)
+        attacker = add_population(model, attacker_pos, count=50, nation=attacker_nation)
+        defender = add_population(model, defender_pos, count=20, nation=defender_nation)
+        model.rng = FixedRandom([0.33])
+
+        model.handle_conquest(attacker, defender, 25, attacker.beliefs, attacker.tech_level)
+
+        self.assertEqual(defender_cell.manufactory_level, 1)
+
     def test_attack_pays_flat_refined_cost_plus_tech_surcharge(self):
         model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
         attacker_pos = (1, 1)
@@ -398,6 +444,27 @@ class Phase2MacroeconomicsTests(unittest.TestCase):
         self.assertAlmostEqual(attacker_nation.refined_stockpile, 24.99)
         self.assertEqual(attacker.inhabitant_count, 100)
 
+    def test_failed_launched_attack_adds_half_devastation_without_conquest(self):
+        model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
+        attacker_pos = (1, 1)
+        defender_pos = (2, 1)
+        force_land(model, attacker_pos)
+        defender_cell = force_land(model, defender_pos)
+        model.attack_scale_constant = 1000.0
+        attacker_nation = model.create_nation("#e83f6f", attacker_pos, refined_stockpile=100.0)
+        defender_nation = model.create_nation("#a855f7", defender_pos)
+        attacker = add_population(model, attacker_pos, count=100, nation=attacker_nation)
+        defender = add_population(model, defender_pos, count=10, nation=defender_nation)
+        model.rng = FixedRandom([0.0, 1.0])
+
+        attacked = attacker.maybe_attack_neighbor()
+
+        self.assertFalse(attacked)
+        self.assertIs(defender.nation, defender_nation)
+        self.assertAlmostEqual(defender_cell.devastation, 0.5)
+        self.assertEqual(defender_cell.steps_since_conflict, 0)
+        self.assertEqual(model.attack_events, 1)
+
     def test_investment_chooses_highest_artisan_tile(self):
         model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
         low = (0, 1)
@@ -434,6 +501,106 @@ class Phase2MacroeconomicsTests(unittest.TestCase):
         self.assertFalse(invested)
         self.assertEqual(cell.manufactory_level, 1)
         self.assertEqual(nation.refined_stockpile, cost)
+
+    def test_devastation_recovery_timing_and_clamps(self):
+        model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
+        pos = (1, 1)
+        cell = force_land(model, pos)
+
+        model.add_tile_devastation(pos, 1000.0)
+        self.assertEqual(cell.devastation, model.economy_config.devastation_max)
+
+        for _ in range(9):
+            model.step()
+        self.assertEqual(cell.devastation, 100.0)
+        self.assertEqual(cell.steps_since_conflict, 9)
+
+        model.step()
+        self.assertEqual(cell.devastation, 99.0)
+        self.assertEqual(cell.steps_since_conflict, 0)
+
+        model.add_tile_devastation(pos, 0.5)
+        self.assertEqual(cell.steps_since_conflict, 0)
+        for _ in range(9):
+            model.step()
+        self.assertAlmostEqual(cell.devastation, 99.5)
+
+        cell.devastation = 0.5
+        cell.steps_since_conflict = 9
+        model.step()
+        self.assertEqual(cell.devastation, 0.0)
+
+    def test_devastation_scales_production_linearly(self):
+        model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
+        pos = (1, 1)
+        cell = force_land(model, pos, arable=0.5, raw=0.5)
+        cell.raw_goods_stockpile = 1000.0
+        cell.manufactory_level = 1
+        cell.devastation = 50.0
+        nation = model.create_nation("#e83f6f", pos)
+        population = add_population(model, pos, count=200, nation=nation)
+
+        population.produce_goods()
+
+        self.assertEqual(population.last_farmers, 60)
+        self.assertEqual(population.last_extractors, 40)
+        self.assertEqual(population.last_manufacturers, 25)
+        self.assertEqual(population.last_artisans, 75)
+        self.assertAlmostEqual(population.last_food_produced, 30.0)
+        self.assertAlmostEqual(population.last_raw_extracted, 20.0)
+        self.assertAlmostEqual(population.last_refined_produced, 16.25)
+        self.assertAlmostEqual(cell.raw_goods_stockpile, 1000.0 + 20.0 - 16.25)
+
+        population.reset_tick_production()
+        cell.reset_tick_production()
+        cell.devastation = 100.0
+        before = cell.raw_goods_stockpile
+        population.produce_goods()
+
+        self.assertEqual(population.last_food_produced, 0.0)
+        self.assertEqual(population.last_raw_extracted, 0.0)
+        self.assertEqual(population.last_refined_produced, 0.0)
+        self.assertEqual(cell.raw_goods_stockpile, before)
+
+    def test_food_capacity_and_expansion_targets_use_devastation(self):
+        model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
+        center = (1, 1)
+        low_dev = (0, 1)
+        high_dev = (2, 1)
+        for pos in (center, low_dev, high_dev):
+            force_land(model, pos, arable=1.0, raw=1.0)
+        model.resource_cell_at(high_dev).devastation = 50.0
+        nation = model.create_nation("#e83f6f", center)
+        add_population(model, center, count=20, nation=nation)
+
+        self.assertAlmostEqual(
+            model.food_growth_capacity_at(high_dev),
+            model.food_growth_capacity_at(low_dev) * 0.5,
+        )
+        self.assertEqual(model.best_expansion_targets(center)[0], low_dev)
+
+    def test_variable_manufactory_cost_filters_unaffordable_tiles(self):
+        model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
+        low = (0, 1)
+        high = (1, 1)
+        low_cell = force_land(model, low)
+        high_cell = force_land(model, high)
+        low_cell.devastation = 1.0
+        high_cell.devastation = 100.0
+        low_cost = model.manufactory_cost_for_cell(low_cell)
+        nation = model.create_nation("#e83f6f", low, refined_stockpile=low_cost)
+        low_pop = add_population(model, low, count=20, nation=nation)
+        high_pop = add_population(model, high, count=20, nation=nation)
+        low_pop.last_artisans = 5
+        high_pop.last_artisans = 50
+
+        invested = nation.invest_in_manufactory(model)
+
+        self.assertTrue(invested)
+        self.assertEqual(low_cell.manufactory_level, 1)
+        self.assertEqual(high_cell.manufactory_level, 0)
+        self.assertAlmostEqual(nation.refined_stockpile, 0.0)
+        self.assertAlmostEqual(low_cost, model.economy_config.manufactory_cost * 2.0)
 
     def test_expansion_uses_food_growth_capacity_threshold(self):
         model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
@@ -559,6 +726,8 @@ class Phase2MacroeconomicsTests(unittest.TestCase):
             global_row["raw_stockpile"],
             sum(cell.raw_goods_stockpile for cell in model.resource_cells.values()),
         )
+        self.assertIn("avg_devastation", global_row)
+        self.assertIn("max_devastation", global_row)
         self.assertEqual(len(snapshot["lineages"]), len(model.nations))
 
     def test_stats_history_tracks_lineage_membership_and_defeat(self):
@@ -594,6 +763,8 @@ class Phase2MacroeconomicsTests(unittest.TestCase):
             "gdp",
             "gdp_per_capita",
             "manufactories",
+            "avg_devastation",
+            "max_devastation",
             "food_stockpile",
             "raw_stockpile",
             "refined_stockpile",
@@ -629,6 +800,7 @@ class Phase2MacroeconomicsTests(unittest.TestCase):
                 (pygame.K_5, "tech"),
                 (pygame.K_6, "diplo"),
                 (pygame.K_7, "physical"),
+                (pygame.K_8, "devastation"),
             ]
             for key, mode in key_pairs:
                 viewer.handle_key(key)
@@ -679,7 +851,7 @@ class Phase2MacroeconomicsTests(unittest.TestCase):
 
     def test_cli_accepts_new_modes_and_legacy_resources_alias(self):
         parser = build_parser()
-        for mode in ("arable", "raw", "manufactories", "resources"):
+        for mode in ("arable", "raw", "manufactories", "devastation", "resources"):
             args = parser.parse_args(["--headless", "--map-mode", mode])
             self.assertEqual(args.map_mode, mode)
 

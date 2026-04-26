@@ -63,9 +63,18 @@ LINEAGE_COLORS = (
 
 MIN_POPULATION_BRIGHTNESS = 0.35
 POPULATION_BRIGHTNESS_GAMMA = 0.65
-DISPLAY_MAP_MODES = ("terrain", "arable", "raw", "manufactories", "tech", "diplo", "physical")
+DISPLAY_MAP_MODES = (
+    "terrain",
+    "arable",
+    "raw",
+    "manufactories",
+    "tech",
+    "diplo",
+    "physical",
+    "devastation",
+)
 MAP_MODES = DISPLAY_MAP_MODES + ("resources",)
-ENVIRONMENTAL_MAP_MODES = {"arable", "raw", "resources", "manufactories"}
+ENVIRONMENTAL_MAP_MODES = {"arable", "raw", "resources", "manufactories", "devastation"}
 STAT_METRICS = (
     {"key": "step", "label": "Step", "format": "int", "graph": True},
     {"key": "inhabitants", "label": "Inhabitants", "format": "int", "graph": True},
@@ -87,6 +96,8 @@ STAT_METRICS = (
     {"key": "artisans", "label": "Artisans", "format": "int", "graph": True},
     {"key": "births", "label": "Births", "format": "int", "graph": True},
     {"key": "manufactories", "label": "Manufactories", "format": "int", "graph": True},
+    {"key": "avg_devastation", "label": "Avg Devastation", "format": "float", "graph": True},
+    {"key": "max_devastation", "label": "Max Devastation", "format": "float", "graph": True},
     {"key": "max_tech", "label": "Max Tech", "format": "int", "graph": True},
     {"key": "avg_tech", "label": "Avg Tech", "format": "float", "graph": True},
     {"key": "military_investment", "label": "Military Share", "format": "percent", "graph": True},
@@ -523,6 +534,10 @@ class WorldModel(mesa.Model):
         occupied_tiles = len(active_populations)
         raw_stockpile = self._raw_stockpile_for(active_populations, global_scope=nation is None)
         manufactories = self._manufactories_for(active_populations, global_scope=nation is None)
+        avg_devastation, max_devastation = self._devastation_stats_for(
+            active_populations,
+            global_scope=nation is None,
+        )
         food_produced = self._food_produced_for(active_populations, nation)
         refined_produced = self._refined_produced_for(active_populations, nation)
         raw_extracted = sum(population.last_raw_extracted for population in active_populations)
@@ -580,6 +595,8 @@ class WorldModel(mesa.Model):
             "births": births,
             "max_tech": max_tech,
             "avg_tech": avg_tech,
+            "avg_devastation": avg_devastation,
+            "max_devastation": max_devastation,
             "military_investment": investments["military"],
             "economic_investment": investments["economic"],
             "diplomatic_investment": investments["diplomatic"],
@@ -616,6 +633,27 @@ class WorldModel(mesa.Model):
             if cell is not None and cell.manufactory_level > 0:
                 total += 1
         return total
+
+    def _devastation_stats_for(
+        self,
+        populations: List[Population],
+        global_scope: bool = False,
+    ) -> Tuple[float, float]:
+        if global_scope:
+            values = [
+                cell.devastation
+                for cell in self.resource_cells.values()
+                if cell.is_land
+            ]
+        else:
+            values = []
+            for population in populations:
+                cell = self.resource_cell_at(population.pos)
+                if cell is not None and cell.is_land:
+                    values.append(cell.devastation)
+        if not values:
+            return 0.0, 0.0
+        return sum(values) / len(values), max(values)
 
     def _food_produced_for(
         self,
@@ -726,6 +764,27 @@ class WorldModel(mesa.Model):
         x, y = pos
         return float(self.arable_map[y, x])
 
+    def devastation_at(self, pos: Position) -> float:
+        cell = self.resource_cell_at(pos)
+        if cell is None:
+            return 0.0
+        return float(cell.devastation)
+
+    def devastation_multiplier_at(self, pos: Position) -> float:
+        cell = self.resource_cell_at(pos)
+        if cell is None:
+            return 0.0
+        return cell.production_multiplier
+
+    def add_tile_devastation(self, pos: Position, amount: float) -> None:
+        cell = self.resource_cell_at(pos)
+        if cell is None or not cell.is_land:
+            return
+        cell.add_devastation(amount)
+
+    def manufactory_cost_for_cell(self, cell: ResourceCell) -> float:
+        return self.economy_config.manufactory_cost * (1.0 + max(0.0, cell.devastation))
+
     def carrying_capacity_at(self, pos: Position) -> float:
         return self.food_growth_capacity_at(pos)
 
@@ -737,7 +796,12 @@ class WorldModel(mesa.Model):
 
     def max_food_output_at(self, pos: Position, tech_multiplier: float = 1.0) -> float:
         farmers = self.max_farmers_at(pos)
-        return farmers * self.economy_config.food_per_farmer * max(0.0, tech_multiplier)
+        return (
+            farmers
+            * self.economy_config.food_per_farmer
+            * max(0.0, tech_multiplier)
+            * self.devastation_multiplier_at(pos)
+        )
 
     def food_growth_capacity_at(self, pos: Position, tech_multiplier: float = 1.0) -> float:
         denominator = (
@@ -849,6 +913,17 @@ class WorldModel(mesa.Model):
         target.refined_deficit_ticks = 0
         target.refined_growth_multiplier = 1.0
         self.conquest_events += 1
+        self.add_tile_devastation(
+            target_pos,
+            self.economy_config.devastation_capture_increase,
+        )
+        target_cell = self.resource_cell_at(target_pos)
+        if (
+            target_cell is not None
+            and target_cell.manufactory_level > 0
+            and self.rng.random() < self.economy_config.manufactory_destruction_chance
+        ):
+            target_cell.manufactory_level = 0
 
         if old_nation is None or new_nation is None or old_nation is new_nation:
             return
@@ -896,6 +971,7 @@ class WorldModel(mesa.Model):
     def step(self) -> None:
         self._sync_population_index_if_needed()
         self._age_attack_arrows()
+        self._recover_devastation()
         self._reset_tick_state()
         self._run_population_production()
         if self._next_step_number() % self.economy_config.local_logistics_period == 0:
@@ -949,6 +1025,10 @@ class WorldModel(mesa.Model):
     def _run_nation_investment(self) -> None:
         for nation in self.surviving_nations():
             nation.invest_in_manufactory(self)
+
+    def _recover_devastation(self) -> None:
+        for cell in self.resource_cells.values():
+            cell.recover_devastation()
 
     def redistribute_local_raw_goods(self) -> None:
         deltas = {pos: 0.0 for pos in self.resource_cells}
@@ -1101,6 +1181,16 @@ class WorldModel(mesa.Model):
                 values,
                 low=np.array((0.22, 0.29, 0.32)),
                 high=np.array((0.38, 0.84, 0.88)),
+            )
+        if map_mode == "devastation":
+            values = np.zeros((self.height, self.width), dtype=float)
+            max_devastation = max(1e-9, self.economy_config.devastation_max)
+            for (x, y), cell in self.resource_cells.items():
+                values[y, x] = min(1.0, max(0.0, cell.devastation / max_devastation))
+            return self.scalar_rgb_array(
+                values,
+                low=np.array((0.24, 0.45, 0.26)),
+                high=np.array((0.80, 0.12, 0.10)),
             )
 
         return terrain_rgb

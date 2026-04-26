@@ -31,6 +31,12 @@ class EconomyConfig:
     combat_refined_base_cost: float = 10.0
     combat_refined_cost_per_tech_level: float = 5.0
     manufactory_cost: float = 10000
+    manufactory_destruction_chance: float = 0.33
+    devastation_max: float = 100.0
+    devastation_capture_increase: float = 1.0
+    devastation_failed_attack_increase: float = 0.5
+    devastation_recovery_period: int = 10
+    devastation_recovery_amount: float = 1.0
     local_logistics_period: int = 10
     center_lps_weight: float = 1.5
 
@@ -104,8 +110,7 @@ class NationManager:
         self.population_agents.clear()
 
     def invest_in_manufactory(self, model: "WorldModel") -> bool:
-        cost = model.economy_config.manufactory_cost
-        if self.defeated or self.refined_stockpile < cost:
+        if self.defeated:
             return False
 
         candidates = []
@@ -117,13 +122,16 @@ class NationManager:
                 continue
             if cell.manufactory_level >= 1:
                 continue
-            candidates.append((population.last_artisans, population.inhabitant_count, population.pos, cell))
+            cost = model.manufactory_cost_for_cell(cell)
+            if self.refined_stockpile < cost:
+                continue
+            candidates.append((population.last_artisans, population.inhabitant_count, population.pos, cost, cell))
 
         if not candidates:
             return False
 
         candidates.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
-        _, _, _, cell = candidates[0]
+        _, _, _, cost, cell = candidates[0]
         self.refined_stockpile -= cost
         cell.manufactory_level = 1
         return True
