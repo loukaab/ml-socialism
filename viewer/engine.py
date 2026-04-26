@@ -15,14 +15,14 @@ Color = Tuple[int, int, int]
 LAND_COLOR: Color = (46, 140, 61)
 WATER_COLOR: Color = (38, 89, 199)
 GRID_COLOR: Color = (24, 31, 42)
-LOW_ARABLE_COLOR: Color = (89, 71, 41)
-HIGH_ARABLE_COLOR: Color = (143, 209, 87)
-LOW_RAW_COLOR: Color = (97, 69, 31)
-HIGH_RAW_COLOR: Color = (250, 214, 56)
+LOW_ARABLE_COLOR: Color = (212, 232, 132)
+HIGH_ARABLE_COLOR: Color = (18, 94, 38)
+LOW_RAW_COLOR: Color = (224, 202, 154)
+HIGH_RAW_COLOR: Color = (70, 45, 24)
 LOW_FACTORY_COLOR: Color = (56, 74, 82)
 HIGH_FACTORY_COLOR: Color = (97, 214, 224)
-LOW_DEVASTATION_COLOR: Color = (61, 115, 66)
-HIGH_DEVASTATION_COLOR: Color = (204, 31, 26)
+LOW_DEVASTATION_COLOR: Color = (0, 93, 32)
+HIGH_DEVASTATION_COLOR: Color = (255, 24, 24)
 TEXT_COLOR: Color = (235, 238, 242)
 PANEL_COLOR: Color = (20, 24, 31)
 PANEL_BORDER: Color = (75, 84, 99)
@@ -111,6 +111,8 @@ class InteractiveViewer:
         self.steps_per_second = 4.0
         self.step_accumulator = 0.0
         self.map_mode = "terrain"
+        self.status_panel_collapsed = True
+        self.visible_devastation_max = 0.0
         self.map_mode_tooltip: Optional[str] = None
         self.quick_menu_pos: Optional[Tuple[int, int]] = None
         self.quick_menu_rects: Dict[str, pygame.Rect] = {}
@@ -241,6 +243,9 @@ class InteractiveViewer:
             if self.handle_window_mouse_down(event):
                 return
             if self.handle_map_mode_selector_click(event.pos):
+                return
+            if self.status_toggle_rect().collidepoint(event.pos):
+                self.status_panel_collapsed = not self.status_panel_collapsed
                 return
             if self.slider_rect().collidepoint(event.pos):
                 self.slider_dragging = True
@@ -469,11 +474,17 @@ class InteractiveViewer:
             self.model.height,
             int(((screen_height - self.camera_y) // self.tile_size) + 2),
         )
+        self.visible_devastation_max = self.viewport_devastation_max(
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+        )
 
         tile = max(1, int(self.tile_size + 1))
         for y in range(start_y, end_y):
             for x in range(start_x, end_x):
-                color = self.tile_color(x, y)
+                color = self.tile_color(x, y, self.visible_devastation_max)
                 rect = pygame.Rect(
                     int(self.camera_x + x * self.tile_size),
                     int(self.camera_y + y * self.tile_size),
@@ -490,6 +501,28 @@ class InteractiveViewer:
         self.draw_hover_population_label()
         if self.tile_size >= 14:
             self.draw_grid(start_x, start_y, end_x, end_y)
+
+    def viewport_devastation_max(
+        self,
+        start_x: int,
+        start_y: int,
+        end_x: int,
+        end_y: int,
+    ) -> float:
+        if normalize_map_mode(self.map_mode) != "devastation":
+            return 0.0
+        maximum = 0.0
+        for y in range(start_y, end_y):
+            for x in range(start_x, end_x):
+                if self.model.terrain_map[y, x]:
+                    maximum = max(maximum, self.model.devastation_at((x, y)))
+        return maximum
+
+    def devastation_color_value(self, pos: Tuple[int, int], visible_max: Optional[float] = None) -> float:
+        maximum = self.visible_devastation_max if visible_max is None else visible_max
+        if maximum <= 0:
+            return 0.0
+        return min(1.0, max(0.0, self.model.devastation_at(pos) / maximum))
 
     def draw_map_mode_selector(self) -> None:
         button_rects = self.map_mode_button_rects()
@@ -1287,7 +1320,12 @@ class InteractiveViewer:
             for index in range(3)
         )
 
-    def tile_color(self, x: int, y: int) -> Color:
+    def tile_color(
+        self,
+        x: int,
+        y: int,
+        visible_devastation_max: Optional[float] = None,
+    ) -> Color:
         if not self.model.terrain_map[y, x]:
             return WATER_COLOR
 
@@ -1301,29 +1339,65 @@ class InteractiveViewer:
             value = 0.0 if cell is None or cell.manufactory_level <= 0 else 1.0
             return lerp_color(LOW_FACTORY_COLOR, HIGH_FACTORY_COLOR, value)
         if mode == "devastation":
-            max_devastation = max(1e-9, self.model.economy_config.devastation_max)
-            value = self.model.devastation_at((x, y)) / max_devastation
+            value = self.devastation_color_value((x, y), visible_devastation_max)
             return lerp_color(LOW_DEVASTATION_COLOR, HIGH_DEVASTATION_COLOR, value)
         return LAND_COLOR
 
     def draw_status_panel(self) -> None:
-        rows = self.status_rows()
+        rows = [] if self.status_panel_collapsed else self.status_rows()
 
-        width = 260
-        height = 20 + len(rows) * 24 + 36
-        panel = pygame.Rect(14, 14, width, height)
+        panel = self.status_panel_rect()
         pygame.draw.rect(self.screen, PANEL_COLOR, panel, border_radius=6)
         pygame.draw.rect(self.screen, PANEL_BORDER, panel, width=1, border_radius=6)
 
-        for index, row in enumerate(rows):
-            surface = self.font.render(row, True, TEXT_COLOR)
-            self.screen.blit(surface, (26, 24 + index * 24))
+        self.draw_status_toggle()
+        if self.status_panel_collapsed:
+            surface = self.small_font.render("Speed", True, MUTED_TEXT_COLOR)
+            self.screen.blit(surface, (panel.x + 12, panel.y + 14))
+        else:
+            for index, row in enumerate(rows):
+                surface = self.font.render(row, True, TEXT_COLOR)
+                self.screen.blit(surface, (panel.x + 12, panel.y + 10 + index * 24))
 
         self.draw_slider()
 
+    def status_panel_rect(self) -> pygame.Rect:
+        width = 260
+        if self.status_panel_collapsed:
+            return pygame.Rect(14, 14, width, 64)
+        rows = self.status_rows()
+        height = 20 + len(rows) * 24 + 36
+        return pygame.Rect(14, 14, width, height)
+
+    def status_toggle_rect(self) -> pygame.Rect:
+        panel = self.status_panel_rect()
+        return pygame.Rect(panel.right - 30, panel.y + 8, 20, 20)
+
+    def draw_status_toggle(self) -> None:
+        rect = self.status_toggle_rect()
+        hovered = rect.collidepoint(pygame.mouse.get_pos())
+        pygame.draw.rect(self.screen, PANEL_HOVER if hovered else PANEL_MUTED, rect, border_radius=4)
+        pygame.draw.rect(self.screen, PANEL_BORDER, rect, width=1, border_radius=4)
+        if self.status_panel_collapsed:
+            points = [
+                (rect.x + 7, rect.y + 5),
+                (rect.x + 14, rect.centery),
+                (rect.x + 7, rect.bottom - 5),
+            ]
+        else:
+            points = [
+                (rect.x + 5, rect.y + 7),
+                (rect.centerx, rect.bottom - 6),
+                (rect.right - 5, rect.y + 7),
+            ]
+        pygame.draw.polygon(self.screen, TEXT_COLOR, points)
+
     def slider_rect(self) -> pygame.Rect:
+        panel = self.status_panel_rect()
+        if self.status_panel_collapsed:
+            return pygame.Rect(panel.x + 48, panel.y + 40, panel.width - 72, 8)
         row_count = len(self.status_rows())
-        return pygame.Rect(26, 24 + row_count * 24 + 8, 200, 8)
+        return pygame.Rect(panel.x + 12, panel.y + 18 + row_count * 24, 200, 8)
 
     def status_rows(self) -> list[str]:
         latest = getattr(self.model.datacollector, "latest_model_record", None)

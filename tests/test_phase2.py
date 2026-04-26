@@ -849,6 +849,93 @@ class Phase2MacroeconomicsTests(unittest.TestCase):
         finally:
             pygame.quit()
 
+    def test_status_panel_starts_collapsed_and_toggle_preserves_slider(self):
+        model = WorldModel(width=5, height=5, initial_populations=1, seed=2)
+        viewer = InteractiveViewer(model, width=900, height=620, fps=1)
+        try:
+            self.assertTrue(viewer.status_panel_collapsed)
+            collapsed_panel = viewer.status_panel_rect()
+            collapsed_slider = viewer.slider_rect()
+            self.assertTrue(collapsed_panel.contains(collapsed_slider))
+
+            click = pygame.event.Event(
+                pygame.MOUSEBUTTONDOWN,
+                {"button": 1, "pos": viewer.status_toggle_rect().center},
+            )
+            viewer.handle_mouse_down(click)
+
+            self.assertFalse(viewer.status_panel_collapsed)
+            self.assertGreater(len(viewer.status_rows()), 4)
+            self.assertGreater(viewer.status_panel_rect().height, collapsed_panel.height)
+            self.assertTrue(viewer.status_panel_rect().contains(viewer.slider_rect()))
+        finally:
+            pygame.quit()
+
+    def test_viewer_devastation_colors_autoscale_visible_values(self):
+        model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
+        positions = [(0, 1), (1, 1), (2, 1)]
+        for pos in positions:
+            force_land(model, pos)
+        model.resource_cell_at((0, 1)).devastation = 0.0
+        model.resource_cell_at((1, 1)).devastation = 50.0
+        model.resource_cell_at((2, 1)).devastation = 100.0
+        viewer = InteractiveViewer(model, width=500, height=400, fps=1)
+        try:
+            viewer.map_mode = "devastation"
+            low = viewer.tile_color(0, 1, visible_devastation_max=100.0)
+            mid = viewer.tile_color(1, 1, visible_devastation_max=100.0)
+            high = viewer.tile_color(2, 1, visible_devastation_max=100.0)
+
+            self.assertEqual(low, (0, 93, 32))
+            self.assertGreater(mid[0], low[0])
+            self.assertLess(mid[1], low[1])
+            self.assertGreater(high[0], mid[0])
+            self.assertLess(high[1], mid[1])
+
+            model.resource_cell_at((2, 1)).devastation = 10.0
+            autoscaled = viewer.tile_color(2, 1, visible_devastation_max=10.0)
+            self.assertEqual(autoscaled, (255, 24, 24))
+        finally:
+            pygame.quit()
+
+    def test_arable_and_raw_colors_are_darker_for_more_resources(self):
+        model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
+        low = (0, 1)
+        high = (1, 1)
+        force_land(model, low, arable=0.0, raw=0.0)
+        force_land(model, high, arable=1.0, raw=1.0)
+        viewer = InteractiveViewer(model, width=500, height=400, fps=1)
+        try:
+            viewer.map_mode = "arable"
+            low_arable = viewer.tile_color(*low)
+            high_arable = viewer.tile_color(*high)
+            viewer.map_mode = "raw"
+            low_raw = viewer.tile_color(*low)
+            high_raw = viewer.tile_color(*high)
+
+            self.assertLess(sum(high_arable), sum(low_arable))
+            self.assertLess(sum(high_raw), sum(low_raw))
+        finally:
+            pygame.quit()
+
+    def test_static_environmental_maps_match_new_color_rules(self):
+        model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
+        low = (0, 1)
+        high = (1, 1)
+        force_land(model, low, arable=0.0, raw=0.0)
+        force_land(model, high, arable=1.0, raw=1.0)
+        model.resource_cell_at(low).devastation = 0.0
+        model.resource_cell_at(high).devastation = 10.0
+
+        arable_rgb = model.render_rgb_array(map_mode="arable")
+        raw_rgb = model.render_rgb_array(map_mode="raw")
+        devastation_rgb = model.render_rgb_array(map_mode="devastation")
+
+        self.assertLess(float(arable_rgb[high[1], high[0]].sum()), float(arable_rgb[low[1], low[0]].sum()))
+        self.assertLess(float(raw_rgb[high[1], high[0]].sum()), float(raw_rgb[low[1], low[0]].sum()))
+        self.assertLess(float(devastation_rgb[low[1], low[0], 0]), 0.01)
+        self.assertGreater(float(devastation_rgb[high[1], high[0], 0]), 0.99)
+
     def test_cli_accepts_new_modes_and_legacy_resources_alias(self):
         parser = build_parser()
         for mode in ("arable", "raw", "manufactories", "devastation", "resources"):

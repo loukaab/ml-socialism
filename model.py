@@ -1164,14 +1164,14 @@ class WorldModel(mesa.Model):
         if map_mode == "arable":
             return self.scalar_rgb_array(
                 self.arable_map,
-                low=np.array((0.35, 0.28, 0.16)),
-                high=np.array((0.56, 0.82, 0.34)),
+                low=np.array((0.83, 0.91, 0.52)),
+                high=np.array((0.07, 0.37, 0.15)),
             )
         if map_mode == "raw":
             return self.scalar_rgb_array(
                 self.raw_goods_map,
-                low=np.array((0.38, 0.27, 0.12)),
-                high=np.array((0.98, 0.84, 0.22)),
+                low=np.array((0.88, 0.79, 0.60)),
+                high=np.array((0.27, 0.18, 0.09)),
             )
         if map_mode == "manufactories":
             values = np.zeros((self.height, self.width), dtype=float)
@@ -1184,13 +1184,21 @@ class WorldModel(mesa.Model):
             )
         if map_mode == "devastation":
             values = np.zeros((self.height, self.width), dtype=float)
-            max_devastation = max(1e-9, self.economy_config.devastation_max)
+            max_devastation = max(
+                (
+                    cell.devastation
+                    for cell in self.resource_cells.values()
+                    if cell.is_land
+                ),
+                default=0.0,
+            )
             for (x, y), cell in self.resource_cells.items():
-                values[y, x] = min(1.0, max(0.0, cell.devastation / max_devastation))
+                if max_devastation > 0:
+                    values[y, x] = min(1.0, max(0.0, cell.devastation / max_devastation))
             return self.scalar_rgb_array(
                 values,
-                low=np.array((0.24, 0.45, 0.26)),
-                high=np.array((0.80, 0.12, 0.10)),
+                low=np.array((0.00, 0.36, 0.13)),
+                high=np.array((1.00, 0.09, 0.09)),
             )
 
         return terrain_rgb
