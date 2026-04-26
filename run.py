@@ -1,4 +1,4 @@
-"""Command-line entry point for the phase-1 economic simulator."""
+"""Command-line entry point for the phase-2 economic simulator."""
 
 from __future__ import annotations
 
@@ -6,11 +6,11 @@ import argparse
 from pathlib import Path
 from typing import Optional
 
-from model import WorldModel
+from model import MAP_MODES, WorldModel
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run the phase-1 ABM world.")
+    parser = argparse.ArgumentParser(description="Run the phase-2 ABM world.")
     parser.add_argument("--width", type=int, default=50, help="Grid width.")
     parser.add_argument("--height", type=int, default=35, help="Grid height.")
     parser.add_argument(
@@ -40,11 +40,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--resource-overlay",
         action="store_true",
-        help="Start with or render the static resource overlay.",
+        help="Start with or render the raw-goods overlay.",
     )
     parser.add_argument(
         "--map-mode",
-        choices=("terrain", "resources", "tech", "diplo", "physical"),
+        choices=MAP_MODES,
         default="terrain",
         help="Initial interactive map mode or headless render mode.",
     )
@@ -84,6 +84,10 @@ def print_summary(model: WorldModel, output: Optional[Path] = None) -> None:
     print(f"Surviving lineages: {latest['SurvivingLineages']}")
     print(f"Max tech level: {latest['MaxTech']}")
     print(f"Dominant trait: {latest['DominantTrait']}")
+    print(f"GDP: {latest['GDP']:.2f}")
+    print(f"Food stockpile: {latest['FoodStockpile']:.2f}")
+    print(f"Refined stockpile: {latest['RefinedStockpile']:.2f}")
+    print(f"Manufactories: {latest['Manufactories']}")
 
 
 def main() -> None:

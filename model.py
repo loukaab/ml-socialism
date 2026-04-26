@@ -1,4 +1,4 @@
-"""World model, terrain generation, scheduling, and rendering."""
+"""World orchestration for the phase-2 macroeconomic ABM."""
 
 from __future__ import annotations
 
@@ -16,10 +16,12 @@ import numpy as np
 import pandas as pd
 
 from agents import Population, ResourceCell
+from core.economy import EconomyConfig, NationManager
+from core.geography import TerrainConfig, generate_geography_maps
 
 try:
     import mesa
-except ModuleNotFoundError:
+except (ModuleNotFoundError, ImportError):
     class _Model:
         def __init__(self, *args, **kwargs):
             self.running = True
@@ -61,7 +63,9 @@ LINEAGE_COLORS = (
 
 MIN_POPULATION_BRIGHTNESS = 0.35
 POPULATION_BRIGHTNESS_GAMMA = 0.65
-MAP_MODES = ("terrain", "resources", "tech", "diplo", "physical")
+DISPLAY_MAP_MODES = ("terrain", "arable", "raw", "manufactories", "tech", "diplo", "physical")
+MAP_MODES = DISPLAY_MAP_MODES + ("resources",)
+ENVIRONMENTAL_MAP_MODES = {"arable", "raw", "resources", "manufactories"}
 
 
 class FallbackMultiGrid:
@@ -123,7 +127,7 @@ class FallbackMultiGrid:
 
 
 class FallbackRandomActivation:
-    """Random scheduler compatible with Mesa's old RandomActivation shape."""
+    """Container compatible with Mesa's old RandomActivation shape."""
 
     def __init__(self, model) -> None:
         self.model = model
@@ -190,15 +194,6 @@ SchedulerClass = RandomActivation or FallbackRandomActivation
 CollectorClass = DataCollector or FallbackDataCollector
 
 
-@dataclass(frozen=True)
-class TerrainConfig:
-    land_fraction: float = 0.58
-    smoothing_passes: int = 5
-    resource_smoothing_passes: int = 7
-    carrying_capacity_min: float = 90.0
-    carrying_capacity_max: float = 520.0
-
-
 @dataclass
 class AttackArrow:
     source: Position
@@ -206,8 +201,12 @@ class AttackArrow:
     remaining_steps: int = 3
 
 
+def normalize_map_mode(map_mode: str) -> str:
+    return "raw" if map_mode == "resources" else map_mode
+
+
 class WorldModel(mesa.Model):
-    """Localized capitalist baseline world for the phase-1 ABM."""
+    """Macroeconomic world with nations, supply chains, and deterministic phases."""
 
     def __init__(
         self,
@@ -216,12 +215,14 @@ class WorldModel(mesa.Model):
         initial_populations: int = 8,
         seed: Optional[int] = None,
         terrain: TerrainConfig = TerrainConfig(),
+        economy: EconomyConfig = EconomyConfig(),
     ) -> None:
         super().__init__()
         self.width = width
         self.height = height
         self.initial_populations = initial_populations
         self.terrain_config = terrain
+        self.economy_config = economy
         self.rng = np.random.default_rng(seed)
         self.python_random = random.Random(seed)
 
@@ -229,6 +230,7 @@ class WorldModel(mesa.Model):
         self.schedule = SchedulerClass(self)
         self._next_id = 1
         self.resource_cells: Dict[Position, ResourceCell] = {}
+        self.nations: List[NationManager] = []
         self.expansion_events = 0
         self.attack_events = 0
         self.conquest_events = 0
@@ -244,30 +246,16 @@ class WorldModel(mesa.Model):
         self.population_growth_rate = 0.085
         self.attack_scale_constant = 0.05
 
-        self.terrain_map = self._generate_terrain()
-        self.resource_map = self._generate_resource_map()
-        self.carrying_capacity_map = self._generate_carrying_capacity_map()
+        geography = generate_geography_maps(self.rng, width, height, terrain)
+        self.terrain_map = geography.terrain_map
+        self.arable_map = geography.arable_map
+        self.raw_goods_map = geography.raw_goods_map
+        self.resource_map = self.raw_goods_map
+        self.carrying_capacity_map = geography.carrying_capacity_map
+
         self._populate_resource_layer()
         self._seed_populations()
-
-        self.datacollector = CollectorClass(
-            model_reporters={
-                "MaxTech": lambda model: model.max_tech_level(),
-                "SurvivingLineages": lambda model: model.surviving_lineage_count(),
-                "DominantTrait": lambda model: model.dominant_trait(),
-                "PopulationAgents": lambda model: len(model.populations),
-                "TotalInhabitants": lambda model: model.total_inhabitants(),
-                "OccupiedTiles": lambda model: len(model.populations),
-                "ExpansionEvents": lambda model: model.expansion_events,
-                "AttackEvents": lambda model: model.attack_events,
-                "ConquestEvents": lambda model: model.conquest_events,
-            },
-            agent_reporters={
-                "Inhabitants": lambda agent: getattr(agent, "inhabitant_count", None),
-                "TechLevel": lambda agent: getattr(agent, "tech_level", None),
-                "LineageColor": lambda agent: getattr(agent, "lineage_color", None),
-            },
-        )
+        self.datacollector = self._build_datacollector()
         self.datacollector.collect(self)
 
     def next_id(self) -> int:
@@ -281,66 +269,56 @@ class WorldModel(mesa.Model):
             agent for agent in self.schedule.agents if isinstance(agent, Population)
         ]
 
-    def _smooth_noise(self, smoothing_passes: int) -> np.ndarray:
-        noise = self.rng.random((self.height, self.width))
-        for _ in range(smoothing_passes):
-            padded = np.pad(noise, 1, mode="edge")
-            noise = (
-                padded[:-2, :-2]
-                + padded[:-2, 1:-1]
-                + padded[:-2, 2:]
-                + padded[1:-1, :-2]
-                + padded[1:-1, 1:-1]
-                + padded[1:-1, 2:]
-                + padded[2:, :-2]
-                + padded[2:, 1:-1]
-                + padded[2:, 2:]
-            ) / 9.0
-        return noise
+    def surviving_nations(self) -> List[NationManager]:
+        return [
+            nation
+            for nation in self.nations
+            if not nation.defeated and nation.controlled_populations(self)
+        ]
 
-    def _generate_terrain(self) -> np.ndarray:
-        noise = self._smooth_noise(self.terrain_config.smoothing_passes)
-        threshold = np.quantile(noise, 1.0 - self.terrain_config.land_fraction)
-        return noise >= threshold
+    def create_nation(
+        self,
+        lineage_color: str,
+        capital_pos: Optional[Position],
+        food_stockpile: float = 0.0,
+        refined_stockpile: float = 0.0,
+    ) -> NationManager:
+        nation = NationManager(
+            unique_id=self.next_id(),
+            lineage_color=lineage_color,
+            capital_pos=capital_pos,
+            food_stockpile=float(food_stockpile),
+            refined_stockpile=float(refined_stockpile),
+        )
+        self.nations.append(nation)
+        return nation
 
-    def _generate_resource_map(self) -> np.ndarray:
-        resource_noise = self._smooth_noise(self.terrain_config.resource_smoothing_passes)
-        land_values = resource_noise[self.terrain_map]
-        resource_map = np.zeros((self.height, self.width), dtype=float)
-        if land_values.size == 0:
-            return resource_map
-
-        low = float(land_values.min())
-        high = float(land_values.max())
-        if high == low:
-            normalized = np.ones_like(resource_noise)
-        else:
-            normalized = (resource_noise - low) / (high - low)
-        resource_map[self.terrain_map] = np.clip(normalized[self.terrain_map], 0.0, 1.0)
-        return resource_map
-
-    def _generate_carrying_capacity_map(self) -> np.ndarray:
-        minimum = self.terrain_config.carrying_capacity_min
-        maximum = self.terrain_config.carrying_capacity_max
-        capacity = minimum + self.resource_map * (maximum - minimum)
-        capacity[~self.terrain_map] = 0.0
-        return capacity
+    def nation_for_lineage(
+        self,
+        lineage_color: str,
+        capital_pos: Optional[Position] = None,
+    ) -> NationManager:
+        for nation in self.nations:
+            if not nation.defeated and nation.lineage_color == lineage_color:
+                if nation.capital_pos is None and capital_pos is not None:
+                    nation.capital_pos = capital_pos
+                return nation
+        return self.create_nation(lineage_color, capital_pos)
 
     def _populate_resource_layer(self) -> None:
         for y in range(self.height):
             for x in range(self.width):
                 is_land = bool(self.terrain_map[y, x])
-                resource_value = float(self.resource_map[y, x])
-                capacity = float(self.carrying_capacity_map[y, x])
-
+                pos = (x, y)
                 cell = ResourceCell(
                     unique_id=self.next_id(),
                     model=self,
                     terrain_type="Land" if is_land else "Water",
-                    resource_value=resource_value,
-                    carrying_capacity=capacity,
+                    resource_value=float(self.raw_goods_map[y, x]),
+                    raw_goods_value=float(self.raw_goods_map[y, x]),
+                    arable_value=float(self.arable_map[y, x]),
+                    carrying_capacity=float(self.carrying_capacity_map[y, x]),
                 )
-                pos = (x, y)
                 self.resource_cells[pos] = cell
                 self.grid.place_agent(cell, pos)
                 self.schedule.add(cell)
@@ -352,13 +330,19 @@ class WorldModel(mesa.Model):
             raise ValueError("Cannot place more starting populations than land cells.")
 
         for index, pos in enumerate(land_positions[: self.initial_populations]):
+            initial_food = float(self.rng.uniform(35.0, 80.0))
+            nation = self.create_nation(
+                lineage_color=self._lineage_color(index),
+                capital_pos=pos,
+                food_stockpile=initial_food,
+            )
             population = Population(
                 unique_id=self.next_id(),
                 model=self,
                 inhabitant_count=int(self.rng.integers(35, 80)),
-                stockpile=float(self.rng.uniform(35.0, 80.0)),
+                stockpile=0.0,
                 tech_level=0,
-                lineage_color=self._lineage_color(index),
+                nation=nation,
             )
             self.grid.place_agent(population, pos)
             self.schedule.add(population)
@@ -370,6 +354,35 @@ class WorldModel(mesa.Model):
         hue = (0.83 + index * 0.071) % 1.0
         red, green, blue = colorsys.hsv_to_rgb(hue, 0.78, 0.95)
         return f"#{int(red * 255):02x}{int(green * 255):02x}{int(blue * 255):02x}"
+
+    def _build_datacollector(self):
+        return CollectorClass(
+            model_reporters={
+                "MaxTech": lambda model: model.max_tech_level(),
+                "SurvivingLineages": lambda model: model.surviving_lineage_count(),
+                "DominantTrait": lambda model: model.dominant_trait(),
+                "PopulationAgents": lambda model: len(model.populations),
+                "TotalInhabitants": lambda model: model.total_inhabitants(),
+                "OccupiedTiles": lambda model: len(model.populations),
+                "ExpansionEvents": lambda model: model.expansion_events,
+                "AttackEvents": lambda model: model.attack_events,
+                "ConquestEvents": lambda model: model.conquest_events,
+                "GDP": lambda model: model.total_gdp(),
+                "FoodStockpile": lambda model: model.total_food_stockpile(),
+                "RefinedStockpile": lambda model: model.total_refined_stockpile(),
+                "Manufactories": lambda model: model.total_manufactories(),
+            },
+            agent_reporters={
+                "Inhabitants": lambda agent: getattr(agent, "inhabitant_count", None),
+                "TechLevel": lambda agent: getattr(agent, "tech_level", None),
+                "LineageColor": lambda agent: getattr(agent, "lineage_color", None),
+                "NationID": lambda agent: getattr(getattr(agent, "nation", None), "unique_id", None),
+                "Farmers": lambda agent: getattr(agent, "last_farmers", None),
+                "Extractors": lambda agent: getattr(agent, "last_extractors", None),
+                "Manufacturers": lambda agent: getattr(agent, "last_manufacturers", None),
+                "Artisans": lambda agent: getattr(agent, "last_artisans", None),
+            },
+        )
 
     def resource_cells_by_terrain(self, terrain_type: str) -> Iterable[Position]:
         for pos, cell in self.resource_cells.items():
@@ -406,8 +419,15 @@ class WorldModel(mesa.Model):
         return self.resource_cells.get(pos)
 
     def resource_value_at(self, pos: Position) -> float:
+        return self.raw_goods_value_at(pos)
+
+    def raw_goods_value_at(self, pos: Position) -> float:
         x, y = pos
-        return float(self.resource_map[y, x])
+        return float(self.raw_goods_map[y, x])
+
+    def arable_value_at(self, pos: Position) -> float:
+        x, y = pos
+        return float(self.arable_map[y, x])
 
     def carrying_capacity_at(self, pos: Position) -> float:
         x, y = pos
@@ -444,12 +464,11 @@ class WorldModel(mesa.Model):
             unique_id=self.next_id(),
             model=self,
             inhabitant_count=migrants,
-            stockpile=parent.stockpile * 0.20,
+            stockpile=0.0,
             tech_level=parent.tech_level,
-            lineage_color=parent.lineage_color,
+            nation=parent.nation,
             beliefs=parent.beliefs,
         )
-        parent.stockpile *= 0.80
         self.grid.place_agent(child, target_pos)
         self.schedule.add(child)
         self.expansion_events += 1
@@ -465,18 +484,51 @@ class WorldModel(mesa.Model):
                 continue
             candidates.append(target_pos)
 
-        self.rng.shuffle(candidates)
+        self.python_random.shuffle(candidates)
         candidates.sort(
             key=lambda candidate: self.carrying_capacity_at(candidate),
             reverse=True,
         )
         return candidates
 
+    def handle_conquest(
+        self,
+        attacker: Population,
+        target: Population,
+        new_inhabitants: int,
+        new_beliefs: Dict[str, float],
+        new_tech_level: int,
+    ) -> None:
+        old_nation = target.nation
+        new_nation = attacker.nation
+        target_pos = target.pos
+
+        target.nation = new_nation
+        target._lineage_color = new_nation.lineage_color if new_nation is not None else target._lineage_color
+        target._set_beliefs(new_beliefs)
+        target.tech_level = new_tech_level
+        target.inhabitant_count = max(1, int(new_inhabitants))
+        target.growth_remainder = 0.0
+        target.food_deficit_ticks = 0
+        target.refined_deficit_ticks = 0
+        target.refined_growth_multiplier = 1.0
+        self.conquest_events += 1
+
+        if old_nation is None or new_nation is None or old_nation is new_nation:
+            return
+
+        if not old_nation.controlled_populations(self):
+            old_nation.mark_defeated_by(new_nation)
+            return
+
+        if old_nation.capital_pos == target_pos:
+            old_nation.reassign_capital(self)
+
     def max_tech_level(self) -> int:
         return max((population.tech_level for population in self.populations), default=0)
 
     def surviving_lineage_count(self) -> int:
-        return len({population.lineage_color for population in self.populations})
+        return len(self.surviving_nations())
 
     def total_inhabitants(self) -> int:
         return sum(population.inhabitant_count for population in self.populations)
@@ -490,11 +542,116 @@ class WorldModel(mesa.Model):
             return "none"
         return max(totals, key=totals.get)
 
+    def total_gdp(self) -> float:
+        return sum(nation.gdp for nation in self.surviving_nations())
+
+    def total_food_stockpile(self) -> float:
+        return sum(nation.food_stockpile for nation in self.surviving_nations())
+
+    def total_refined_stockpile(self) -> float:
+        return sum(nation.refined_stockpile for nation in self.surviving_nations())
+
+    def total_manufactories(self) -> int:
+        return sum(cell.manufactory_level for cell in self.resource_cells.values())
+
+    def max_manufactory_level(self) -> int:
+        return max((cell.manufactory_level for cell in self.resource_cells.values()), default=0)
+
     def step(self) -> None:
         self._age_attack_arrows()
-        self.schedule.step()
+        self._reset_tick_state()
+        self._run_population_production()
+        if self._next_step_number() % self.economy_config.local_logistics_period == 0:
+            self.redistribute_local_raw_goods()
+        self._run_population_consumption_and_growth()
+        self._run_conflict_and_expansion()
+        self._run_nation_investment()
         self._flush_pending_attack_arrows()
+        self._advance_schedule_clock()
         self.datacollector.collect(self)
+
+    def _next_step_number(self) -> int:
+        return int(getattr(self.schedule, "steps", 0)) + 1
+
+    def _advance_schedule_clock(self) -> None:
+        if hasattr(self.schedule, "steps"):
+            self.schedule.steps += 1
+        if hasattr(self.schedule, "time"):
+            self.schedule.time += 1
+
+    def _reset_tick_state(self) -> None:
+        for nation in self.nations:
+            nation.reset_tick()
+        for cell in self.resource_cells.values():
+            cell.reset_tick_production()
+        for population in self.populations:
+            population.reset_tick_production()
+
+    def _run_population_production(self) -> None:
+        for population in sorted(self.populations, key=lambda item: item.unique_id):
+            population.produce_goods()
+
+    def _run_population_consumption_and_growth(self) -> None:
+        for population in sorted(self.populations, key=lambda item: item.unique_id):
+            population.consume_goods()
+            population.diffuse_tech()
+            population.advance_tech()
+            population.grow_logistically()
+            population.drift_traits()
+
+    def _run_conflict_and_expansion(self) -> None:
+        for population in sorted(list(self.populations), key=lambda item: item.unique_id):
+            if population in self.populations:
+                population.maybe_attack_neighbor()
+        for population in sorted(list(self.populations), key=lambda item: item.unique_id):
+            if population in self.populations:
+                population.expand_or_migrate()
+
+    def _run_nation_investment(self) -> None:
+        for nation in self.surviving_nations():
+            nation.invest_in_manufactory(self)
+
+    def redistribute_local_raw_goods(self) -> None:
+        deltas = {pos: 0.0 for pos in self.resource_cells}
+        for source_population in self.populations:
+            source_pos = source_population.pos
+            source_cell = self.resource_cell_at(source_pos)
+            if source_cell is None or source_cell.raw_goods_stockpile <= 0:
+                continue
+
+            recipients = []
+            for pos in self.neighbor_positions(
+                source_pos,
+                moore=True,
+                include_center=True,
+                radius=1,
+            ):
+                recipient_population = self.population_at(pos)
+                if recipient_population is None:
+                    continue
+                if recipient_population.nation is not source_population.nation:
+                    continue
+                recipient_cell = self.resource_cell_at(pos)
+                if recipient_cell is None:
+                    continue
+                weight = recipient_cell.last_refined_produced
+                if pos == source_pos:
+                    weight *= self.economy_config.center_lps_weight
+                recipients.append((pos, max(0.0, weight)))
+
+            total_weight = sum(weight for _, weight in recipients)
+            if total_weight <= 0:
+                continue
+
+            amount = source_cell.raw_goods_stockpile
+            deltas[source_pos] -= amount
+            for recipient_pos, weight in recipients:
+                deltas[recipient_pos] += amount * (weight / total_weight)
+
+        for pos, delta in deltas.items():
+            if delta:
+                cell = self.resource_cells[pos]
+                cell.raw_goods_stockpile = max(0.0, cell.raw_goods_stockpile + delta)
 
     def register_attack_arrow(self, source: Position, target: Position) -> None:
         self._pending_attack_arrows.append((source, target))
@@ -526,20 +683,35 @@ class WorldModel(mesa.Model):
         if map_mode not in MAP_MODES:
             raise ValueError(f"Unknown map mode: {map_mode}")
 
-        terrain_rgb = self.render_rgb_array(resource_overlay=map_mode == "resources")
+        normalized_mode = normalize_map_mode(map_mode)
+        terrain_rgb = self.render_rgb_array(map_mode=normalized_mode)
         global_max_population = self.global_max_population()
-        for population in self.populations:
-            x, y = population.pos
-            terrain_rgb[y, x] = self.population_rgb(
-                population,
-                map_mode=map_mode,
-                global_max_population=global_max_population,
-            )
+        if normalized_mode not in ENVIRONMENTAL_MAP_MODES:
+            for population in self.populations:
+                x, y = population.pos
+                terrain_rgb[y, x] = self.population_rgb(
+                    population,
+                    map_mode=normalized_mode,
+                    global_max_population=global_max_population,
+                )
 
         fig, ax = plt.subplots(figsize=(10, 7))
         ax.imshow(terrain_rgb, origin="lower")
+        for nation in self.surviving_nations():
+            if nation.capital_pos is None:
+                continue
+            x, y = nation.capital_pos
+            ax.scatter(
+                [x],
+                [y],
+                marker="*",
+                s=95,
+                c="#ffd84d",
+                edgecolors="black",
+                linewidths=0.8,
+            )
 
-        title = f"ABM World - {map_mode.title()} Map"
+        title = f"ABM World - {normalized_mode.title()} Map"
         ax.set_title(title)
         ax.set_xlabel("X")
         ax.set_ylabel("Y")
@@ -557,23 +729,50 @@ class WorldModel(mesa.Model):
             plt.close(fig)
         return fig
 
-    def render_rgb_array(self, resource_overlay: bool = False) -> np.ndarray:
+    def render_rgb_array(
+        self,
+        resource_overlay: bool = False,
+        map_mode: str = "terrain",
+    ) -> np.ndarray:
+        if resource_overlay:
+            map_mode = "raw"
+        map_mode = normalize_map_mode(map_mode)
+
         terrain_rgb = np.zeros((self.height, self.width, 3), dtype=float)
         terrain_rgb[self.terrain_map] = (0.18, 0.55, 0.24)
         terrain_rgb[~self.terrain_map] = (0.15, 0.35, 0.78)
-        if not resource_overlay:
-            return terrain_rgb
 
-        low_resource = np.array((0.38, 0.27, 0.12))
-        high_resource = np.array((0.98, 0.84, 0.22))
-        resource_rgb = low_resource + self.resource_map[..., None] * (
-            high_resource - low_resource
-        )
-        terrain_rgb[self.terrain_map] = (
-            terrain_rgb[self.terrain_map] * 0.35
-            + resource_rgb[self.terrain_map] * 0.65
-        )
+        if map_mode == "arable":
+            return self.scalar_rgb_array(
+                self.arable_map,
+                low=np.array((0.35, 0.28, 0.16)),
+                high=np.array((0.56, 0.82, 0.34)),
+            )
+        if map_mode == "raw":
+            return self.scalar_rgb_array(
+                self.raw_goods_map,
+                low=np.array((0.38, 0.27, 0.12)),
+                high=np.array((0.98, 0.84, 0.22)),
+            )
+        if map_mode == "manufactories":
+            values = np.zeros((self.height, self.width), dtype=float)
+            max_level = max(1, self.max_manufactory_level())
+            for (x, y), cell in self.resource_cells.items():
+                values[y, x] = cell.manufactory_level / max_level
+            return self.scalar_rgb_array(
+                values,
+                low=np.array((0.22, 0.29, 0.32)),
+                high=np.array((0.38, 0.84, 0.88)),
+            )
+
         return terrain_rgb
+
+    def scalar_rgb_array(self, values: np.ndarray, low: np.ndarray, high: np.ndarray) -> np.ndarray:
+        rgb = np.zeros((self.height, self.width, 3), dtype=float)
+        rgb[~self.terrain_map] = (0.15, 0.35, 0.78)
+        scalar_rgb = low + values[..., None] * (high - low)
+        rgb[self.terrain_map] = scalar_rgb[self.terrain_map]
+        return rgb
 
     def global_max_population(self) -> int:
         return max((population.inhabitant_count for population in self.populations), default=1)

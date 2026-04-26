@@ -7,7 +7,7 @@ from typing import Optional, Tuple
 
 import pygame
 
-from model import WorldModel
+from model import DISPLAY_MAP_MODES, ENVIRONMENTAL_MAP_MODES, WorldModel, normalize_map_mode
 
 
 Color = Tuple[int, int, int]
@@ -15,17 +15,21 @@ Color = Tuple[int, int, int]
 LAND_COLOR: Color = (46, 140, 61)
 WATER_COLOR: Color = (38, 89, 199)
 GRID_COLOR: Color = (24, 31, 42)
-LOW_RESOURCE_COLOR: Color = (97, 69, 31)
-HIGH_RESOURCE_COLOR: Color = (250, 214, 56)
+LOW_ARABLE_COLOR: Color = (89, 71, 41)
+HIGH_ARABLE_COLOR: Color = (143, 209, 87)
+LOW_RAW_COLOR: Color = (97, 69, 31)
+HIGH_RAW_COLOR: Color = (250, 214, 56)
+LOW_FACTORY_COLOR: Color = (56, 74, 82)
+HIGH_FACTORY_COLOR: Color = (97, 214, 224)
 TEXT_COLOR: Color = (235, 238, 242)
 PANEL_COLOR: Color = (20, 24, 31)
 PANEL_BORDER: Color = (75, 84, 99)
 SLIDER_TRACK_COLOR: Color = (72, 79, 92)
 SLIDER_FILL_COLOR: Color = (211, 217, 225)
 SLIDER_KNOB_COLOR: Color = (255, 255, 255)
+STAR_COLOR: Color = (255, 216, 77)
 MIN_POPULATION_BRIGHTNESS = 0.35
 POPULATION_BRIGHTNESS_GAMMA = 0.65
-MAP_MODES = ("terrain", "resources", "tech", "diplo", "physical")
 MIN_STEPS_PER_SECOND = 1.0
 MAX_STEPS_PER_SECOND = 30.0
 
@@ -33,6 +37,11 @@ MAX_STEPS_PER_SECOND = 30.0
 def hex_to_rgb(value: str) -> Color:
     stripped = value.lstrip("#")
     return tuple(int(stripped[index : index + 2], 16) for index in (0, 2, 4))
+
+
+def lerp_color(low: Color, high: Color, value: float) -> Color:
+    value = min(1.0, max(0.0, value))
+    return tuple(int(low[index] + value * (high[index] - low[index])) for index in range(3))
 
 
 class InteractiveViewer:
@@ -75,11 +84,11 @@ class InteractiveViewer:
 
     @property
     def show_resource_overlay(self) -> bool:
-        return self.map_mode == "resources"
+        return normalize_map_mode(self.map_mode) == "raw"
 
     @show_resource_overlay.setter
     def show_resource_overlay(self, enabled: bool) -> None:
-        self.map_mode = "resources" if enabled else "terrain"
+        self.map_mode = "raw" if enabled else "terrain"
 
     def center_map(self) -> None:
         screen_width, screen_height = self.screen.get_size()
@@ -133,12 +142,16 @@ class InteractiveViewer:
         elif key in (pygame.K_1, pygame.K_KP1):
             self.map_mode = "terrain"
         elif key in (pygame.K_2, pygame.K_KP2):
-            self.map_mode = "resources"
+            self.map_mode = "arable"
         elif key in (pygame.K_3, pygame.K_KP3):
-            self.map_mode = "tech"
+            self.map_mode = "raw"
         elif key in (pygame.K_4, pygame.K_KP4):
-            self.map_mode = "diplo"
+            self.map_mode = "manufactories"
         elif key in (pygame.K_5, pygame.K_KP5):
+            self.map_mode = "tech"
+        elif key in (pygame.K_6, pygame.K_KP6):
+            self.map_mode = "diplo"
+        elif key in (pygame.K_7, pygame.K_KP7):
             self.map_mode = "physical"
         elif key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
             self.zoom_at(self.screen_center(), 1.12)
@@ -154,8 +167,8 @@ class InteractiveViewer:
             self.camera_x -= 32
 
     def cycle_map_mode(self) -> None:
-        index = MAP_MODES.index(self.map_mode)
-        self.map_mode = MAP_MODES[(index + 1) % len(MAP_MODES)]
+        index = DISPLAY_MAP_MODES.index(normalize_map_mode(self.map_mode))
+        self.map_mode = DISPLAY_MAP_MODES[(index + 1) % len(DISPLAY_MAP_MODES)]
 
     def handle_mouse_down(self, event) -> None:
         if event.button in (1, 2, 3):
@@ -241,9 +254,11 @@ class InteractiveViewer:
                 )
                 pygame.draw.rect(self.screen, color, rect)
 
-        self.draw_owned_tiles()
+        if normalize_map_mode(self.map_mode) not in ENVIRONMENTAL_MAP_MODES:
+            self.draw_owned_tiles()
         self.draw_lineage_borders(start_x, start_y, end_x, end_y)
         self.draw_attack_arrows()
+        self.draw_capital_stars()
         self.draw_hover_population_label()
         if self.tile_size >= 14:
             self.draw_grid(start_x, start_y, end_x, end_y)
@@ -302,37 +317,13 @@ class InteractiveViewer:
                 bottom = int(self.camera_y + (y + 1) * self.tile_size)
 
                 if self.has_border(population, x - 1, y):
-                    pygame.draw.line(
-                        self.screen,
-                        (0, 0, 0),
-                        (left, top),
-                        (left, bottom),
-                        thickness,
-                    )
+                    pygame.draw.line(self.screen, (0, 0, 0), (left, top), (left, bottom), thickness)
                 if self.has_border(population, x + 1, y):
-                    pygame.draw.line(
-                        self.screen,
-                        (0, 0, 0),
-                        (right, top),
-                        (right, bottom),
-                        thickness,
-                    )
+                    pygame.draw.line(self.screen, (0, 0, 0), (right, top), (right, bottom), thickness)
                 if self.has_border(population, x, y - 1):
-                    pygame.draw.line(
-                        self.screen,
-                        (0, 0, 0),
-                        (left, top),
-                        (right, top),
-                        thickness,
-                    )
+                    pygame.draw.line(self.screen, (0, 0, 0), (left, top), (right, top), thickness)
                 if self.has_border(population, x, y + 1):
-                    pygame.draw.line(
-                        self.screen,
-                        (0, 0, 0),
-                        (left, bottom),
-                        (right, bottom),
-                        thickness,
-                    )
+                    pygame.draw.line(self.screen, (0, 0, 0), (left, bottom), (right, bottom), thickness)
 
     def has_border(self, population, neighbor_x: int, neighbor_y: int) -> bool:
         if not (0 <= neighbor_x < self.model.width and 0 <= neighbor_y < self.model.height):
@@ -340,7 +331,7 @@ class InteractiveViewer:
         neighbor = self.model.population_at((neighbor_x, neighbor_y))
         if neighbor is None:
             return True
-        return neighbor.lineage_color != population.lineage_color
+        return neighbor.nation is not population.nation
 
     def draw_attack_arrows(self) -> None:
         for arrow in self.model.attack_arrows:
@@ -396,6 +387,40 @@ class InteractiveViewer:
         )
         pygame.draw.polygon(self.screen, (220, 36, 36), [end, inset_left, inset_right])
 
+    def draw_capital_stars(self) -> None:
+        if self.tile_size < 6:
+            return
+        for nation in self.model.surviving_nations():
+            if nation.capital_pos is None:
+                continue
+            center = self.tile_center(nation.capital_pos)
+            self.draw_star(center, max(4, int(self.tile_size * 0.32)))
+
+    def draw_star(self, center: Tuple[int, int], radius: int) -> None:
+        points = []
+        inner = max(2, int(radius * 0.45))
+        for index in range(10):
+            angle = -math.pi / 2 + index * math.pi / 5
+            active_radius = radius if index % 2 == 0 else inner
+            points.append(
+                (
+                    int(center[0] + math.cos(angle) * active_radius),
+                    int(center[1] + math.sin(angle) * active_radius),
+                )
+            )
+        pygame.draw.polygon(self.screen, (0, 0, 0), points)
+        inset_points = []
+        for index in range(10):
+            angle = -math.pi / 2 + index * math.pi / 5
+            active_radius = max(1, radius - 2) if index % 2 == 0 else max(1, inner - 1)
+            inset_points.append(
+                (
+                    int(center[0] + math.cos(angle) * active_radius),
+                    int(center[1] + math.sin(angle) * active_radius),
+                )
+            )
+        pygame.draw.polygon(self.screen, STAR_COLOR, inset_points)
+
     def draw_hover_population_label(self) -> None:
         if self.tile_size < 12:
             return
@@ -442,21 +467,22 @@ class InteractiveViewer:
         return pygame.transform.smoothscale(label, (width, height))
 
     def population_tile_color(self, population, global_max_population: Optional[int] = None) -> Color:
-        if self.map_mode == "tech":
+        mode = normalize_map_mode(self.map_mode)
+        if mode == "tech":
             return self.dark_investment_color(
                 population.x_tech,
                 max_value=0.3,
                 light=(222, 210, 255),
                 dark=(44, 22, 92),
             )
-        if self.map_mode == "diplo":
+        if mode == "diplo":
             return self.dark_investment_color(
                 population.y_dip,
                 max_value=0.3,
                 light=(255, 212, 232),
                 dark=(95, 18, 58),
             )
-        if self.map_mode == "physical":
+        if mode == "physical":
             return self.physical_split_color(population.e_econ_ratio)
 
         lineage_color = hex_to_rgb(population.lineage_color)
@@ -495,22 +521,23 @@ class InteractiveViewer:
     def tile_color(self, x: int, y: int) -> Color:
         if not self.model.terrain_map[y, x]:
             return WATER_COLOR
-        if self.map_mode != "resources":
-            return LAND_COLOR
 
-        resource = float(self.model.resource_map[y, x])
-        return tuple(
-            int(
-                LOW_RESOURCE_COLOR[index]
-                + resource * (HIGH_RESOURCE_COLOR[index] - LOW_RESOURCE_COLOR[index])
-            )
-            for index in range(3)
-        )
+        mode = normalize_map_mode(self.map_mode)
+        if mode == "arable":
+            return lerp_color(LOW_ARABLE_COLOR, HIGH_ARABLE_COLOR, float(self.model.arable_map[y, x]))
+        if mode == "raw":
+            return lerp_color(LOW_RAW_COLOR, HIGH_RAW_COLOR, float(self.model.raw_goods_map[y, x]))
+        if mode == "manufactories":
+            cell = self.model.resource_cell_at((x, y))
+            max_level = max(1, self.model.max_manufactory_level())
+            value = 0.0 if cell is None else cell.manufactory_level / max_level
+            return lerp_color(LOW_FACTORY_COLOR, HIGH_FACTORY_COLOR, value)
+        return LAND_COLOR
 
     def draw_status_panel(self) -> None:
         rows = self.status_rows()
 
-        width = 220
+        width = 260
         height = 20 + len(rows) * 24 + 36
         panel = pygame.Rect(14, 14, width, height)
         pygame.draw.rect(self.screen, PANEL_COLOR, panel, border_radius=6)
@@ -524,7 +551,7 @@ class InteractiveViewer:
 
     def slider_rect(self) -> pygame.Rect:
         row_count = len(self.status_rows())
-        return pygame.Rect(26, 24 + row_count * 24 + 8, 170, 8)
+        return pygame.Rect(26, 24 + row_count * 24 + 8, 200, 8)
 
     def status_rows(self) -> list[str]:
         latest = self.model.datacollector.get_model_vars_dataframe().iloc[-1]
@@ -533,15 +560,16 @@ class InteractiveViewer:
             f"Step {int(latest['Step'])}",
             f"{'Playing' if self.playing else 'Paused'}",
             f"Populations {int(latest['PopulationAgents'])}",
-            f"Occupied {int(latest['OccupiedTiles'])}",
             f"Inhabitants {int(latest['TotalInhabitants'])}",
-            f"Expansions {int(latest['ExpansionEvents'])}",
-            f"Attacks {int(latest['AttackEvents'])}",
-            f"Conquests {int(latest['ConquestEvents'])}",
             f"Lineages {int(latest['SurvivingLineages'])}",
+            f"GDP {float(latest['GDP']):.1f}",
+            f"Food {float(latest['FoodStockpile']):.1f}",
+            f"Refined {float(latest['RefinedStockpile']):.1f}",
+            f"Manufactories {int(latest['Manufactories'])}",
+            f"Conquests {int(latest['ConquestEvents'])}",
             f"Max tech {int(latest['MaxTech'])}",
             f"Dominant {latest['DominantTrait']}",
-            f"Map {self.map_mode.title()}",
+            f"Map {normalize_map_mode(self.map_mode).title()}",
             f"Timestep {self.steps_per_second:.1f}/s",
             f"Zoom {self.tile_size:.1f} px",
             hover_text,
@@ -578,10 +606,16 @@ class InteractiveViewer:
         if tile_pos is None:
             return "Hover off map"
 
+        cell = self.model.resource_cell_at(tile_pos)
         population = self.model.population_at(tile_pos)
         if population is None:
-            return f"Hover {tile_pos}: 0"
-        return f"Hover {tile_pos}: {population.inhabitant_count}"
+            if cell is None:
+                return f"Hover {tile_pos}: empty"
+            return f"Hover {tile_pos}: A{cell.arable_value:.2f} R{cell.raw_goods_value:.2f}"
+        return (
+            f"Hover {tile_pos}: {population.inhabitant_count} "
+            f"F{population.last_farmers} M{population.last_manufacturers}"
+        )
 
     def screen_to_tile(self, screen_pos: Tuple[int, int]) -> Optional[Tuple[int, int]]:
         x = int((screen_pos[0] - self.camera_x) // self.tile_size)

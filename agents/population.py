@@ -1,7 +1,8 @@
-"""Agent definitions for the phase-1 economic simulation."""
+"""Population and tile agents for the phase-2 macroeconomic simulator."""
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Dict, Optional, Tuple
@@ -10,7 +11,7 @@ import numpy as np
 
 try:
     import mesa
-except ModuleNotFoundError:
+except (ModuleNotFoundError, ImportError):
     class _Agent:
         def __init__(self, unique_id=None, model=None):
             self.unique_id = unique_id
@@ -22,6 +23,17 @@ except ModuleNotFoundError:
 
 Position = Tuple[int, int]
 BeliefMap = Dict[str, float]
+
+
+def init_mesa_agent(agent, unique_id: int, model) -> None:
+    try:
+        super(type(agent), agent).__init__(unique_id, model)
+    except TypeError:
+        super(type(agent), agent).__init__(model)
+        agent.unique_id = unique_id
+    agent.model = model
+    if not hasattr(agent, "pos"):
+        agent.pos = None
 
 
 def random_beliefs(rng: np.random.Generator) -> BeliefMap:
@@ -61,6 +73,14 @@ class Allocation:
 
 
 @dataclass(frozen=True)
+class JobAllocation:
+    farmers: int
+    extractors: int
+    manufacturers: int
+    artisans: int
+
+
+@dataclass(frozen=True)
 class AttackPlan:
     target: "Population"
     defender_power: float
@@ -80,11 +100,18 @@ class ResourceCell(mesa.Agent):
         terrain_type: str,
         resource_value: float = 0.0,
         carrying_capacity: float = 0.0,
+        arable_value: float = 0.0,
+        raw_goods_value: Optional[float] = None,
     ) -> None:
-        super().__init__(unique_id, model)
+        init_mesa_agent(self, unique_id, model)
         self.terrain_type = terrain_type
-        self.resource_value = float(resource_value)
+        self.arable_value = float(arable_value)
+        self.raw_goods_value = float(resource_value if raw_goods_value is None else raw_goods_value)
+        self.resource_value = self.raw_goods_value
         self.carrying_capacity = float(carrying_capacity)
+        self.raw_goods_stockpile = 0.0
+        self.manufactory_level = 0
+        self.reset_tick_production()
 
     @property
     def is_land(self) -> bool:
@@ -94,33 +121,44 @@ class ResourceCell(mesa.Agent):
     def color(self) -> str:
         return "green" if self.is_land else "blue"
 
+    def reset_tick_production(self) -> None:
+        self.last_farmers = 0
+        self.last_extractors = 0
+        self.last_manufacturers = 0
+        self.last_artisans = 0
+        self.last_food_produced = 0.0
+        self.last_raw_extracted = 0.0
+        self.last_refined_produced = 0.0
+
     def harvest(self, amount: float) -> float:
         if not self.is_land or amount <= 0:
             return 0.0
-        return min(amount, self.resource_value * 10.0)
+        return min(amount, self.raw_goods_value * 10.0)
 
     def step(self) -> None:
         return None
 
 
 class Population(mesa.Agent):
-    """Competitive population occupying one land tile."""
+    """Competitive population occupying one controlled land tile."""
 
     def __init__(
         self,
         unique_id: int,
         model,
         inhabitant_count: int,
-        lineage_color: str,
+        lineage_color: Optional[str] = None,
         beliefs: Optional[BeliefMap] = None,
         stockpile: float = 25.0,
         tech_level: int = 0,
+        nation=None,
     ) -> None:
-        super().__init__(unique_id, model)
+        init_mesa_agent(self, unique_id, model)
         self.inhabitant_count = int(inhabitant_count)
+        self._lineage_color = lineage_color or "#cccccc"
+        self.nation = nation
         self.stockpile = float(stockpile)
         self.tech_level = int(tech_level)
-        self.lineage_color = lineage_color
 
         normalized = normalize_beliefs(beliefs or random_beliefs(model.rng))
         self.x_tech = normalized["x_tech"]
@@ -133,6 +171,23 @@ class Population(mesa.Agent):
         self.diplomatic_bank = 0.0
         self.tech_bank = 0.0
         self.growth_remainder = 0.0
+
+        self.food_deficit_ticks = 0
+        self.refined_deficit_ticks = 0
+        self.refined_growth_multiplier = 1.0
+        self.reset_tick_production()
+
+    @property
+    def lineage_color(self) -> str:
+        if self.nation is not None:
+            return self.nation.lineage_color
+        return self._lineage_color
+
+    @lineage_color.setter
+    def lineage_color(self, value: str) -> None:
+        self._lineage_color = value
+        if self.nation is not None:
+            self.nation.lineage_color = value
 
     @property
     def beliefs(self) -> BeliefMap:
@@ -180,26 +235,161 @@ class Population(mesa.Agent):
     def diplomatic_output(self) -> float:
         return self.investment_proportions["diplomatic"] * self.tech_multiplier
 
-    def allocate(self, harvested: float) -> Allocation:
+    def reset_tick_production(self) -> None:
+        self.last_farmers = 0
+        self.last_extractors = 0
+        self.last_manufacturers = 0
+        self.last_artisans = 0
+        self.last_food_produced = 0.0
+        self.last_raw_extracted = 0.0
+        self.last_refined_produced = 0.0
+
+    def allocate_jobs(self) -> JobAllocation:
+        cell = self.model.resource_cell_at(self.pos)
+        if cell is None or not cell.is_land:
+            return JobAllocation(0, 0, 0, max(0, self.inhabitant_count))
+
+        remaining = max(0, self.inhabitant_count)
+        config = self.model.economy_config
+
+        farmer_slots = max(0, int(cell.arable_value * config.farmer_slot_scale))
+        farmers = min(remaining, farmer_slots)
+        remaining -= farmers
+
+        extractor_slots = max(0, int(cell.raw_goods_value * config.extractor_slot_scale))
+        extractors = min(remaining, extractor_slots)
+        remaining -= extractors
+
+        manufacturer_slots = max(0, cell.manufactory_level * config.manufacturer_jobs_per_level)
+        manufacturers = min(remaining, manufacturer_slots)
+        remaining -= manufacturers
+
+        artisans = remaining
+        return JobAllocation(farmers, extractors, manufacturers, artisans)
+
+    def produce_goods(self) -> None:
+        cell = self.model.resource_cell_at(self.pos)
+        if cell is None or not cell.is_land:
+            return
+
+        config = self.model.economy_config
+        jobs = self.allocate_jobs()
+        multiplier = self.tech_multiplier
+
+        food_produced = jobs.farmers * config.food_per_farmer * multiplier
+        raw_extracted = jobs.extractors * config.raw_per_extractor * multiplier
+        cell.raw_goods_stockpile += raw_extracted
+
+        manufacturer_capacity = (
+            jobs.manufacturers * config.manufacturer_raw_throughput * multiplier
+        )
+        manufacturer_output = min(cell.raw_goods_stockpile, manufacturer_capacity)
+        cell.raw_goods_stockpile -= manufacturer_output
+
+        artisan_capacity = jobs.artisans * config.artisan_raw_throughput * multiplier
+        artisan_output = min(cell.raw_goods_stockpile, artisan_capacity)
+        cell.raw_goods_stockpile -= artisan_output
+
+        refined_produced = manufacturer_output + artisan_output
+
+        self.last_farmers = cell.last_farmers = jobs.farmers
+        self.last_extractors = cell.last_extractors = jobs.extractors
+        self.last_manufacturers = cell.last_manufacturers = jobs.manufacturers
+        self.last_artisans = cell.last_artisans = jobs.artisans
+        self.last_food_produced = cell.last_food_produced = food_produced
+        self.last_raw_extracted = cell.last_raw_extracted = raw_extracted
+        self.last_refined_produced = cell.last_refined_produced = refined_produced
+
+        if self.nation is not None:
+            self.nation.add_production(food=food_produced, refined=refined_produced)
+
+        self.allocate_development(food_produced + raw_extracted + refined_produced)
+
+    def allocate_development(self, output_value: float) -> Allocation:
+        investment_value = max(0.0, output_value) * 0.02
         investments = self.investment_proportions
         allocation = Allocation(
-            military=harvested * investments["military"],
-            economic=harvested * investments["economic"],
-            diplomatic=harvested * investments["diplomatic"],
-            tech=harvested * investments["tech"],
+            military=investment_value * investments["military"],
+            economic=investment_value * investments["economic"],
+            diplomatic=investment_value * investments["diplomatic"],
+            tech=investment_value * investments["tech"],
         )
         self.military_bank += allocation.military
         self.economic_bank += allocation.economic
         self.diplomatic_bank += allocation.diplomatic
         self.tech_bank += allocation.tech
-        self.stockpile += allocation.economic
         return allocation
+
+    def allocate(self, harvested: float) -> Allocation:
+        return self.allocate_development(harvested)
 
     def harvest(self) -> float:
         cell = self.model.resource_cell_at(self.pos)
         if cell is None:
             return 0.0
-        return cell.resource_value * (1.0 + self.economic_output())
+        return cell.raw_goods_value * (1.0 + self.economic_output())
+
+    def consume_goods(self) -> None:
+        if self.nation is None:
+            return
+
+        config = self.model.economy_config
+        food_need = self.inhabitant_count * config.food_need_per_person
+        refined_need = self.inhabitant_count * config.refined_need_per_person
+
+        unmet_food = self.consume_one_good(
+            need=food_need,
+            local_amount=self.last_food_produced,
+            stockpile_name="food_stockpile",
+        )
+        if unmet_food > 0:
+            self.food_deficit_ticks += 1
+            loss = int(math.ceil(unmet_food * self.food_deficit_ticks * config.food_deficit_loss_rate))
+            if loss > 0:
+                self.inhabitant_count = max(1, self.inhabitant_count - loss)
+        else:
+            self.food_deficit_ticks = 0
+
+        unmet_refined = self.consume_one_good(
+            need=refined_need,
+            local_amount=self.last_refined_produced,
+            stockpile_name="refined_stockpile",
+        )
+        if unmet_refined > 0:
+            self.refined_deficit_ticks += 1
+            stall = unmet_refined * self.refined_deficit_ticks / max(1e-9, refined_need)
+            self.refined_growth_multiplier = max(0.0, 1.0 - min(1.0, stall))
+        else:
+            self.refined_deficit_ticks = 0
+            self.refined_growth_multiplier = 1.0
+
+        self.stockpile = self.nation.food_stockpile
+
+    def consume_one_good(
+        self,
+        need: float,
+        local_amount: float,
+        stockpile_name: str,
+    ) -> float:
+        if need <= 0:
+            setattr(
+                self.nation,
+                stockpile_name,
+                getattr(self.nation, stockpile_name) + max(0.0, local_amount),
+            )
+            return 0.0
+
+        local_amount = max(0.0, local_amount)
+        if local_amount >= need:
+            surplus = local_amount - need
+            setattr(self.nation, stockpile_name, getattr(self.nation, stockpile_name) + surplus)
+            return 0.0
+
+        deficit = need - local_amount
+        available = getattr(self.nation, stockpile_name)
+        pulled = min(available, deficit)
+        setattr(self.nation, stockpile_name, available - pulled)
+        return deficit - pulled
 
     def advance_tech(self) -> None:
         threshold = self.model.tech_threshold * (1.0 + self.tech_level * 0.35)
@@ -229,23 +419,13 @@ class Population(mesa.Agent):
         )
 
     def trade_with_neighbors(self) -> None:
-        for neighbor in self.model.populations_near(self.pos):
-            if self.stockpile <= 0 or neighbor.stockpile <= 0:
-                continue
-
-            diplomatic_delta = self.diplomatic_output() - neighbor.diplomatic_output()
-            perceived_bonus = min(0.20, max(0.0, diplomatic_delta * 0.2))
-            trade_amount = min(self.stockpile, neighbor.stockpile, 2.0)
-
-            if trade_amount * (1.0 + perceived_bonus) >= trade_amount * 0.95:
-                self.stockpile += trade_amount * perceived_bonus
-                neighbor.stockpile += trade_amount * 0.02
+        return None
 
     def bordering_enemy_populations(self) -> list["Population"]:
         return [
             neighbor
             for neighbor in self.model.populations_near(self.pos)
-            if neighbor.lineage_color != self.lineage_color
+            if neighbor.nation is not self.nation
         ]
 
     def plan_attack(self, target: "Population") -> Optional[AttackPlan]:
@@ -293,6 +473,9 @@ class Population(mesa.Agent):
         )
 
     def maybe_attack_neighbor(self) -> bool:
+        if self.nation is None or self.nation.defeated:
+            return False
+
         plans = [
             plan
             for enemy in self.bordering_enemy_populations()
@@ -319,12 +502,14 @@ class Population(mesa.Agent):
             target = plan.target
             assimilation_rate = min(1.25 * self.diplomatic_output(), 1.0)
             assimilated = int(target.inhabitant_count * assimilation_rate)
-            target.lineage_color = self.lineage_color
-            target._set_beliefs(self.beliefs)
-            target.tech_level = self.tech_level
-            target.inhabitant_count = max(1, plan.actual_force + assimilated)
-            target.growth_remainder = 0.0
-            self.model.conquest_events += 1
+            new_inhabitants = max(1, plan.actual_force + assimilated)
+            self.model.handle_conquest(
+                attacker=self,
+                target=target,
+                new_inhabitants=new_inhabitants,
+                new_beliefs=self.beliefs,
+                new_tech_level=self.tech_level,
+            )
             return True
         return False
 
@@ -360,16 +545,17 @@ class Population(mesa.Agent):
         growth_rate = self.model.population_growth_rate * economic_bonus
         population = float(self.inhabitant_count)
         delta = growth_rate * population * (1.0 - population / capacity)
+        if delta > 0:
+            delta *= self.refined_growth_multiplier
         next_population = max(1.0, population + delta + self.growth_remainder)
         self.inhabitant_count = max(1, int(next_population))
         self.growth_remainder = next_population - self.inhabitant_count
 
     def step(self) -> None:
-        harvested = self.harvest()
-        self.allocate(harvested)
+        self.produce_goods()
+        self.consume_goods()
         self.diffuse_tech()
         self.advance_tech()
-        self.trade_with_neighbors()
         self.grow_logistically()
         self.drift_traits()
         self.maybe_attack_neighbor()
