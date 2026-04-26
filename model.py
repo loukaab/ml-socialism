@@ -66,6 +66,37 @@ POPULATION_BRIGHTNESS_GAMMA = 0.65
 DISPLAY_MAP_MODES = ("terrain", "arable", "raw", "manufactories", "tech", "diplo", "physical")
 MAP_MODES = DISPLAY_MAP_MODES + ("resources",)
 ENVIRONMENTAL_MAP_MODES = {"arable", "raw", "resources", "manufactories"}
+STAT_METRICS = (
+    {"key": "step", "label": "Step", "format": "int", "graph": True},
+    {"key": "inhabitants", "label": "Inhabitants", "format": "int", "graph": True},
+    {"key": "occupied_tiles", "label": "Tiles", "format": "int", "graph": True},
+    {"key": "gdp", "label": "GDP", "format": "float", "graph": True},
+    {"key": "gdp_per_capita", "label": "GDP / Capita", "format": "float", "graph": True},
+    {"key": "food_stockpile", "label": "Food", "format": "float", "graph": True},
+    {"key": "refined_stockpile", "label": "Refined", "format": "float", "graph": True},
+    {"key": "raw_stockpile", "label": "Raw Stock", "format": "float", "graph": True},
+    {"key": "food_produced", "label": "Food Prod.", "format": "float", "graph": True},
+    {"key": "raw_extracted", "label": "Raw Extracted", "format": "float", "graph": True},
+    {"key": "refined_produced", "label": "Refined Prod.", "format": "float", "graph": True},
+    {"key": "food_produced_per_capita", "label": "Food / Capita", "format": "float", "graph": True},
+    {"key": "raw_extracted_per_capita", "label": "Raw / Capita", "format": "float", "graph": True},
+    {"key": "refined_produced_per_capita", "label": "Refined / Capita", "format": "float", "graph": True},
+    {"key": "farmers", "label": "Farmers", "format": "int", "graph": True},
+    {"key": "extractors", "label": "Extractors", "format": "int", "graph": True},
+    {"key": "manufacturers", "label": "Manufacturers", "format": "int", "graph": True},
+    {"key": "artisans", "label": "Artisans", "format": "int", "graph": True},
+    {"key": "births", "label": "Births", "format": "int", "graph": True},
+    {"key": "manufactories", "label": "Manufactories", "format": "int", "graph": True},
+    {"key": "max_tech", "label": "Max Tech", "format": "int", "graph": True},
+    {"key": "avg_tech", "label": "Avg Tech", "format": "float", "graph": True},
+    {"key": "military_investment", "label": "Military Share", "format": "percent", "graph": True},
+    {"key": "economic_investment", "label": "Economic Share", "format": "percent", "graph": True},
+    {"key": "diplomatic_investment", "label": "Diplomatic Share", "format": "percent", "graph": True},
+    {"key": "tech_investment", "label": "Tech Share", "format": "percent", "graph": True},
+    {"key": "expansions", "label": "Expansions", "format": "int", "graph": True},
+    {"key": "attacks", "label": "Attacks", "format": "int", "graph": True},
+    {"key": "conquests", "label": "Conquests", "format": "int", "graph": True},
+)
 
 
 class FallbackMultiGrid:
@@ -241,6 +272,7 @@ class WorldModel(mesa.Model):
         self.population_agents: List[Population] = []
         self.population_by_pos: Dict[Position, Population] = {}
         self._neighborhood_cache: Dict[Tuple[Position, bool, bool, int], Tuple[Position, ...]] = {}
+        self.stats_history: List[Dict[str, object]] = []
         self.nations: List[NationManager] = []
         self.expansion_events = 0
         self.attack_events = 0
@@ -268,6 +300,7 @@ class WorldModel(mesa.Model):
         self._seed_populations()
         self.datacollector = self._build_datacollector()
         self.datacollector.collect(self)
+        self.collect_stats_snapshot()
 
     def next_id(self) -> int:
         unique_id = self._next_id
@@ -435,6 +468,195 @@ class WorldModel(mesa.Model):
                 model_reporters=model_reporters,
                 agent_reporters=agent_reporters if self.collect_agent_records else {},
             )
+
+    def available_stat_metrics(self) -> List[Dict[str, object]]:
+        return [dict(metric) for metric in STAT_METRICS]
+
+    def current_stats_snapshot(self) -> Dict[str, object]:
+        if not self.stats_history:
+            return self.collect_stats_snapshot()
+        return self.stats_history[-1]
+
+    def collect_stats_snapshot(self) -> Dict[str, object]:
+        step = int(getattr(self.schedule, "steps", 0))
+        snapshot: Dict[str, object] = {
+            "step": step,
+            "global": self._stats_row(
+                step=step,
+                scope="global",
+                label="All",
+                color="#e5e7eb",
+                populations=list(self.population_agents),
+                nation=None,
+                defeated=False,
+            ),
+            "lineages": {},
+        }
+
+        lineages = snapshot["lineages"]
+        for index, nation in enumerate(self.nations, start=1):
+            lineages[nation.unique_id] = self._stats_row(
+                step=step,
+                scope="lineage",
+                label=f"Lineage {index}",
+                color=nation.lineage_color,
+                populations=list(nation.population_agents),
+                nation=nation,
+                defeated=nation.defeated,
+            )
+
+        self.stats_history.append(snapshot)
+        return snapshot
+
+    def _stats_row(
+        self,
+        step: int,
+        scope: str,
+        label: str,
+        color: str,
+        populations: List[Population],
+        nation: Optional[NationManager],
+        defeated: bool,
+    ) -> Dict[str, object]:
+        active_populations = [] if defeated else populations
+        inhabitants = sum(population.inhabitant_count for population in active_populations)
+        occupied_tiles = len(active_populations)
+        raw_stockpile = self._raw_stockpile_for(active_populations, global_scope=nation is None)
+        manufactories = self._manufactories_for(active_populations, global_scope=nation is None)
+        food_produced = self._food_produced_for(active_populations, nation)
+        refined_produced = self._refined_produced_for(active_populations, nation)
+        raw_extracted = sum(population.last_raw_extracted for population in active_populations)
+        farmers = sum(population.last_farmers for population in active_populations)
+        extractors = sum(population.last_extractors for population in active_populations)
+        manufacturers = sum(population.last_manufacturers for population in active_populations)
+        artisans = sum(population.last_artisans for population in active_populations)
+        births = sum(population.last_new_inhabitants for population in active_populations)
+        max_tech = max((population.tech_level for population in active_populations), default=0)
+        avg_tech = self._weighted_average(
+            ((population.tech_level, population.inhabitant_count) for population in active_populations)
+        )
+        investments = self._weighted_investment_shares(active_populations)
+        gdp = self.total_gdp() if nation is None else (0.0 if defeated else nation.gdp)
+        food_stockpile = (
+            self.total_food_stockpile()
+            if nation is None
+            else (0.0 if defeated else nation.food_stockpile)
+        )
+        refined_stockpile = (
+            self.total_refined_stockpile()
+            if nation is None
+            else (0.0 if defeated else nation.refined_stockpile)
+        )
+        per_capita_denominator = max(1, inhabitants)
+
+        return {
+            "step": step,
+            "scope": scope,
+            "nation_id": None if nation is None else nation.unique_id,
+            "label": label,
+            "color": color,
+            "lineage_color": color,
+            "status": "Defeated" if defeated else "Active",
+            "defeated": defeated,
+            "capital_pos": None if nation is None else nation.capital_pos,
+            "inhabitants": inhabitants,
+            "occupied_tiles": occupied_tiles,
+            "gdp": gdp,
+            "gdp_per_capita": gdp / per_capita_denominator,
+            "manufactories": manufactories,
+            "food_stockpile": food_stockpile,
+            "refined_stockpile": refined_stockpile,
+            "raw_stockpile": raw_stockpile,
+            "food_produced": food_produced,
+            "raw_extracted": raw_extracted,
+            "refined_produced": refined_produced,
+            "food_produced_per_capita": food_produced / per_capita_denominator,
+            "raw_extracted_per_capita": raw_extracted / per_capita_denominator,
+            "refined_produced_per_capita": refined_produced / per_capita_denominator,
+            "farmers": farmers,
+            "extractors": extractors,
+            "manufacturers": manufacturers,
+            "artisans": artisans,
+            "births": births,
+            "max_tech": max_tech,
+            "avg_tech": avg_tech,
+            "military_investment": investments["military"],
+            "economic_investment": investments["economic"],
+            "diplomatic_investment": investments["diplomatic"],
+            "tech_investment": investments["tech"],
+            "expansions": self.expansion_events if nation is None else None,
+            "attacks": self.attack_events if nation is None else None,
+            "conquests": self.conquest_events if nation is None else None,
+        }
+
+    def _raw_stockpile_for(
+        self,
+        populations: List[Population],
+        global_scope: bool = False,
+    ) -> float:
+        if global_scope:
+            return sum(cell.raw_goods_stockpile for cell in self.resource_cells.values())
+        total = 0.0
+        for population in populations:
+            cell = self.resource_cell_at(population.pos)
+            if cell is not None:
+                total += cell.raw_goods_stockpile
+        return total
+
+    def _manufactories_for(
+        self,
+        populations: List[Population],
+        global_scope: bool = False,
+    ) -> int:
+        if global_scope:
+            return self.total_manufactories()
+        total = 0
+        for population in populations:
+            cell = self.resource_cell_at(population.pos)
+            if cell is not None and cell.manufactory_level > 0:
+                total += 1
+        return total
+
+    def _food_produced_for(
+        self,
+        populations: List[Population],
+        nation: Optional[NationManager],
+    ) -> float:
+        if nation is None:
+            return sum(population.last_food_produced for population in populations)
+        return nation.total_food_produced
+
+    def _refined_produced_for(
+        self,
+        populations: List[Population],
+        nation: Optional[NationManager],
+    ) -> float:
+        if nation is None:
+            return sum(population.last_refined_produced for population in populations)
+        return nation.total_refined_produced
+
+    def _weighted_investment_shares(self, populations: List[Population]) -> Dict[str, float]:
+        totals = {"military": 0.0, "economic": 0.0, "diplomatic": 0.0, "tech": 0.0}
+        weight_total = sum(population.inhabitant_count for population in populations)
+        if weight_total <= 0:
+            return totals
+
+        for population in populations:
+            weight = population.inhabitant_count
+            proportions = population.investment_proportions
+            for key in totals:
+                totals[key] += proportions[key] * weight
+        return {key: value / weight_total for key, value in totals.items()}
+
+    def _weighted_average(self, values: Iterable[Tuple[float, float]]) -> float:
+        total = 0.0
+        weight_total = 0.0
+        for value, weight in values:
+            total += value * weight
+            weight_total += weight
+        if weight_total <= 0:
+            return 0.0
+        return total / weight_total
 
     def resource_cells_by_terrain(self, terrain_type: str) -> Iterable[Position]:
         for pos, cell in self.resource_cells.items():
@@ -684,6 +906,7 @@ class WorldModel(mesa.Model):
         self._flush_pending_attack_arrows()
         self._advance_schedule_clock()
         self.datacollector.collect(self)
+        self.collect_stats_snapshot()
 
     def _next_step_number(self) -> int:
         return int(getattr(self.schedule, "steps", 0)) + 1

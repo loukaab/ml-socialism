@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import os
 import unittest
 
 import numpy as np
 
+os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
+
+import pygame
+
 from agents import Population
-from model import WorldModel
+from model import DISPLAY_MAP_MODES, WorldModel
 from run import build_parser
+from viewer.engine import InteractiveViewer
 
 
 FIXED_BELIEFS = {"x_tech": 0.1, "y_dip": 0.1, "e_econ_ratio": 0.5}
@@ -534,6 +541,141 @@ class Phase2MacroeconomicsTests(unittest.TestCase):
         ]
         for key in keys:
             self.assertEqual(plain_latest[key], noisy_latest[key])
+
+    def test_stats_history_collects_global_aggregates(self):
+        model = WorldModel(width=6, height=6, initial_populations=2, seed=5)
+
+        self.assertEqual(len(model.stats_history), 1)
+        model.step()
+        snapshot = model.current_stats_snapshot()
+        global_row = snapshot["global"]
+
+        self.assertEqual(len(model.stats_history), 2)
+        self.assertEqual(snapshot["step"], 1)
+        self.assertEqual(global_row["inhabitants"], model.total_inhabitants())
+        self.assertEqual(global_row["occupied_tiles"], len(model.population_agents))
+        self.assertAlmostEqual(global_row["gdp"], model.total_gdp())
+        self.assertAlmostEqual(
+            global_row["raw_stockpile"],
+            sum(cell.raw_goods_stockpile for cell in model.resource_cells.values()),
+        )
+        self.assertEqual(len(snapshot["lineages"]), len(model.nations))
+
+    def test_stats_history_tracks_lineage_membership_and_defeat(self):
+        model = WorldModel(width=4, height=3, initial_populations=0, seed=1)
+        attacker_pos = (1, 1)
+        defender_pos = (2, 1)
+        force_land(model, attacker_pos)
+        force_land(model, defender_pos)
+        attacker_nation = model.create_nation("#e83f6f", attacker_pos)
+        defender_nation = model.create_nation("#a855f7", defender_pos)
+        attacker = add_population(model, attacker_pos, count=50, nation=attacker_nation)
+        defender = add_population(model, defender_pos, count=20, nation=defender_nation)
+
+        active_snapshot = model.collect_stats_snapshot()
+        self.assertEqual(active_snapshot["lineages"][defender_nation.unique_id]["inhabitants"], 20)
+
+        model.handle_conquest(attacker, defender, 25, attacker.beliefs, attacker.tech_level)
+        defeated_snapshot = model.collect_stats_snapshot()
+        defeated_row = defeated_snapshot["lineages"][defender_nation.unique_id]
+
+        self.assertTrue(defeated_row["defeated"])
+        self.assertEqual(defeated_row["status"], "Defeated")
+        self.assertEqual(defeated_row["occupied_tiles"], 0)
+        self.assertEqual(active_snapshot["lineages"][defender_nation.unique_id]["status"], "Active")
+
+    def test_available_stat_metrics_include_requested_fields(self):
+        model = WorldModel(width=5, height=5, initial_populations=1, seed=2)
+        keys = {metric["key"] for metric in model.available_stat_metrics()}
+
+        expected = {
+            "inhabitants",
+            "occupied_tiles",
+            "gdp",
+            "gdp_per_capita",
+            "manufactories",
+            "food_stockpile",
+            "raw_stockpile",
+            "refined_stockpile",
+            "food_produced",
+            "raw_extracted",
+            "refined_produced",
+            "farmers",
+            "extractors",
+            "manufacturers",
+            "artisans",
+            "military_investment",
+            "economic_investment",
+            "diplomatic_investment",
+            "tech_investment",
+        }
+        self.assertTrue(expected.issubset(keys))
+
+    def test_map_mode_selector_clicks_and_hotkeys_work(self):
+        model = WorldModel(width=5, height=5, initial_populations=1, seed=2)
+        viewer = InteractiveViewer(model, width=900, height=620, fps=1)
+        try:
+            for mode in DISPLAY_MAP_MODES:
+                rect = viewer.map_mode_button_rects()[mode]
+                self.assertEqual(viewer.map_mode_at(rect.center), mode)
+                self.assertTrue(viewer.handle_map_mode_selector_click(rect.center))
+                self.assertEqual(viewer.map_mode, mode)
+
+            key_pairs = [
+                (pygame.K_1, "terrain"),
+                (pygame.K_2, "arable"),
+                (pygame.K_3, "raw"),
+                (pygame.K_4, "manufactories"),
+                (pygame.K_5, "tech"),
+                (pygame.K_6, "diplo"),
+                (pygame.K_7, "physical"),
+            ]
+            for key, mode in key_pairs:
+                viewer.handle_key(key)
+                self.assertEqual(viewer.map_mode, mode)
+        finally:
+            pygame.quit()
+
+    def test_right_click_menu_opens_statistics_without_dragging(self):
+        model = WorldModel(width=5, height=5, initial_populations=1, seed=2)
+        viewer = InteractiveViewer(model, width=900, height=620, fps=1)
+        try:
+            right_click = pygame.event.Event(
+                pygame.MOUSEBUTTONDOWN,
+                {"button": 3, "pos": (300, 250)},
+            )
+            viewer.handle_mouse_down(right_click)
+
+            self.assertIsNotNone(viewer.quick_menu_pos)
+            self.assertFalse(viewer.dragging)
+            self.assertFalse(viewer.slider_dragging)
+
+            item = viewer.quick_menu_rects["statistics"]
+            left_click = pygame.event.Event(
+                pygame.MOUSEBUTTONDOWN,
+                {"button": 1, "pos": item.center},
+            )
+            viewer.handle_mouse_down(left_click)
+
+            self.assertIsNone(viewer.quick_menu_pos)
+            self.assertTrue(any(window["id"] == "statistics" for window in viewer.windows))
+        finally:
+            pygame.quit()
+
+    def test_statistics_window_draws_ledger_and_xy_graph_headlessly(self):
+        model = WorldModel(width=8, height=6, initial_populations=2, seed=3)
+        for _ in range(3):
+            model.step()
+        viewer = InteractiveViewer(model, width=900, height=620, fps=1)
+        try:
+            viewer.open_stats_window()
+            viewer.draw()
+            viewer.stats_view = "graph"
+            viewer.stats_x_metric = "gdp"
+            viewer.stats_y_metric = "inhabitants"
+            viewer.draw()
+        finally:
+            pygame.quit()
 
     def test_cli_accepts_new_modes_and_legacy_resources_alias(self):
         parser = build_parser()
