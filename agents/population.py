@@ -249,23 +249,76 @@ class Population(mesa.Agent):
         if cell is None or not cell.is_land:
             return JobAllocation(0, 0, 0, max(0, self.inhabitant_count))
 
-        remaining = max(0, self.inhabitant_count)
         config = self.model.economy_config
+        total_people = max(0, self.inhabitant_count)
 
         farmer_slots = max(0, int(cell.arable_value * config.farmer_slot_scale))
-        farmers = min(remaining, farmer_slots)
-        remaining -= farmers
-
         extractor_slots = max(0, int(cell.raw_goods_value * config.extractor_slot_scale))
-        extractors = min(remaining, extractor_slots)
-        remaining -= extractors
-
         manufacturer_slots = max(0, cell.manufactory_level * config.manufacturer_jobs_per_level)
+
+        starter_jobs = self.starter_job_targets(min(total_people, config.starter_population_band))
+        farmers = min(starter_jobs.farmers, farmer_slots)
+        extractors = min(starter_jobs.extractors, extractor_slots)
+        starter_shortfall = (
+            starter_jobs.farmers
+            + starter_jobs.extractors
+            + starter_jobs.artisans
+            - farmers
+            - extractors
+            - starter_jobs.artisans
+        )
+        artisans = starter_jobs.artisans + max(0, starter_shortfall)
+
+        remaining = total_people - farmers - extractors - artisans
+        remaining_farmer_slots = max(0, farmer_slots - farmers)
+        extra_farmers = min(remaining, remaining_farmer_slots)
+        farmers += extra_farmers
+        remaining -= extra_farmers
+
+        remaining_extractor_slots = max(0, extractor_slots - extractors)
+        extra_extractors = min(remaining, remaining_extractor_slots)
+        extractors += extra_extractors
+        remaining -= extra_extractors
+
         manufacturers = min(remaining, manufacturer_slots)
         remaining -= manufacturers
 
-        artisans = remaining
+        artisans += remaining
         return JobAllocation(farmers, extractors, manufacturers, artisans)
+
+    def starter_job_targets(self, people: int) -> JobAllocation:
+        config = self.model.economy_config
+        if people <= 0 or config.starter_population_band <= 0:
+            return JobAllocation(0, 0, 0, 0)
+
+        starter_total = (
+            config.starter_farmers
+            + config.starter_extractors
+            + config.starter_artisans
+        )
+        if starter_total <= 0:
+            return JobAllocation(0, 0, 0, people)
+
+        quotas = [
+            ("farmers", people * config.starter_farmers / starter_total),
+            ("extractors", people * config.starter_extractors / starter_total),
+            ("artisans", people * config.starter_artisans / starter_total),
+        ]
+        allocations = {name: int(value) for name, value in quotas}
+        remaining = people - sum(allocations.values())
+        fractions = sorted(
+            ((value - int(value), name) for name, value in quotas),
+            key=lambda item: (-item[0], ["farmers", "extractors", "artisans"].index(item[1])),
+        )
+        for _, name in fractions[:remaining]:
+            allocations[name] += 1
+
+        return JobAllocation(
+            farmers=allocations["farmers"],
+            extractors=allocations["extractors"],
+            manufacturers=0,
+            artisans=allocations["artisans"],
+        )
 
     def produce_goods(self) -> None:
         cell = self.model.resource_cell_at(self.pos)

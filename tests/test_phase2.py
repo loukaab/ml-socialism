@@ -92,6 +92,48 @@ class Phase2MacroeconomicsTests(unittest.TestCase):
         self.assertEqual(cell.raw_goods_stockpile, 740.0)
         self.assertEqual(nation.gdp, 1140.0)
 
+    def test_first_sixty_use_starter_job_distribution(self):
+        model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
+        pos = (1, 1)
+        force_land(model, pos, arable=1.0, raw=1.0)
+        nation = model.create_nation("#e83f6f", pos)
+        population = add_population(model, pos, count=60, nation=nation)
+
+        jobs = population.allocate_jobs()
+
+        self.assertEqual(jobs.farmers, 30)
+        self.assertEqual(jobs.extractors, 20)
+        self.assertEqual(jobs.manufacturers, 0)
+        self.assertEqual(jobs.artisans, 10)
+
+    def test_small_starter_population_scales_distribution(self):
+        model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
+        pos = (1, 1)
+        force_land(model, pos, arable=1.0, raw=1.0)
+        nation = model.create_nation("#e83f6f", pos)
+        population = add_population(model, pos, count=36, nation=nation)
+
+        jobs = population.allocate_jobs()
+
+        self.assertEqual(jobs.farmers, 18)
+        self.assertEqual(jobs.extractors, 12)
+        self.assertEqual(jobs.manufacturers, 0)
+        self.assertEqual(jobs.artisans, 6)
+
+    def test_starter_job_limits_fall_back_to_artisans(self):
+        model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
+        pos = (1, 1)
+        force_land(model, pos, arable=0.1, raw=0.1)
+        nation = model.create_nation("#e83f6f", pos)
+        population = add_population(model, pos, count=60, nation=nation)
+
+        jobs = population.allocate_jobs()
+
+        self.assertEqual(jobs.farmers, 12)
+        self.assertEqual(jobs.extractors, 8)
+        self.assertEqual(jobs.manufacturers, 0)
+        self.assertEqual(jobs.artisans, 40)
+
     def test_consumption_uses_local_then_global_and_tracks_deficits(self):
         model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
         pos = (1, 1)

@@ -12,6 +12,10 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class EconomyConfig:
+    starter_population_band: int = 60
+    starter_farmers: int = 30
+    starter_extractors: int = 20
+    starter_artisans: int = 10
     farmer_slot_scale: int = 120
     extractor_slot_scale: int = 80
     food_per_farmer: float = 4.0
