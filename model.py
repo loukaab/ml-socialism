@@ -159,11 +159,14 @@ class FallbackDataCollector:
         self,
         model_reporters: Optional[Dict[str, Callable]] = None,
         agent_reporters: Optional[Dict[str, Callable]] = None,
+        collect_agent_records: bool = False,
     ) -> None:
         self.model_reporters = model_reporters or {}
         self.agent_reporters = agent_reporters or {}
+        self.collect_agent_records = collect_agent_records
         self._model_records: List[Dict[str, object]] = []
         self._agent_records: List[Dict[str, object]] = []
+        self.latest_model_record: Dict[str, object] = {}
 
     def collect(self, model) -> None:
         step = getattr(model.schedule, "steps", 0)
@@ -171,7 +174,10 @@ class FallbackDataCollector:
         for name, reporter in self.model_reporters.items():
             model_row[name] = reporter(model)
         self._model_records.append(model_row)
+        self.latest_model_record = model_row
 
+        if not self.collect_agent_records:
+            return
         for agent in model.schedule.agents:
             row = {
                 "Step": step,
@@ -216,6 +222,7 @@ class WorldModel(mesa.Model):
         seed: Optional[int] = None,
         terrain: TerrainConfig = TerrainConfig(),
         economy: EconomyConfig = EconomyConfig(),
+        collect_agent_records: bool = False,
     ) -> None:
         super().__init__()
         self.width = width
@@ -223,6 +230,7 @@ class WorldModel(mesa.Model):
         self.initial_populations = initial_populations
         self.terrain_config = terrain
         self.economy_config = economy
+        self.collect_agent_records = collect_agent_records
         self.rng = np.random.default_rng(seed)
         self.python_random = random.Random(seed)
 
@@ -230,6 +238,9 @@ class WorldModel(mesa.Model):
         self.schedule = SchedulerClass(self)
         self._next_id = 1
         self.resource_cells: Dict[Position, ResourceCell] = {}
+        self.population_agents: List[Population] = []
+        self.population_by_pos: Dict[Position, Population] = {}
+        self._neighborhood_cache: Dict[Tuple[Position, bool, bool, int], Tuple[Position, ...]] = {}
         self.nations: List[NationManager] = []
         self.expansion_events = 0
         self.attack_events = 0
@@ -265,15 +276,48 @@ class WorldModel(mesa.Model):
 
     @property
     def populations(self) -> List[Population]:
-        return [
+        self._sync_population_index_if_needed()
+        return list(self.population_agents)
+
+    def _sync_population_index_if_needed(self) -> None:
+        expected_agents = len(self.resource_cells) + len(self.population_agents)
+        if len(self.schedule.agents) != expected_agents:
+            self._rebuild_population_indexes()
+
+    def _rebuild_population_indexes(self) -> None:
+        populations = [
             agent for agent in self.schedule.agents if isinstance(agent, Population)
         ]
+        self.population_agents = populations
+        self.population_by_pos = {
+            population.pos: population
+            for population in populations
+            if population.pos is not None
+        }
+        for nation in self.nations:
+            nation.population_agents.clear()
+        for population in populations:
+            if population.nation is not None:
+                population.nation.add_population(population)
+
+    def population_snapshot(self) -> List[Population]:
+        return sorted(self.population_agents, key=lambda item: item.unique_id)
+
+    def register_population(self, population: Population, pos: Position) -> None:
+        if pos in self.population_by_pos:
+            raise ValueError(f"Population already occupies {pos}")
+        self.grid.place_agent(population, pos)
+        self.schedule.add(population)
+        self.population_agents.append(population)
+        self.population_by_pos[pos] = population
+        if population.nation is not None:
+            population.nation.add_population(population)
 
     def surviving_nations(self) -> List[NationManager]:
         return [
             nation
             for nation in self.nations
-            if not nation.defeated and nation.controlled_populations(self)
+            if not nation.defeated and nation.population_agents
         ]
 
     def create_nation(
@@ -344,8 +388,7 @@ class WorldModel(mesa.Model):
                 tech_level=0,
                 nation=nation,
             )
-            self.grid.place_agent(population, pos)
-            self.schedule.add(population)
+            self.register_population(population, pos)
 
     def _lineage_color(self, index: int) -> str:
         if index < len(LINEAGE_COLORS):
@@ -356,33 +399,42 @@ class WorldModel(mesa.Model):
         return f"#{int(red * 255):02x}{int(green * 255):02x}{int(blue * 255):02x}"
 
     def _build_datacollector(self):
-        return CollectorClass(
-            model_reporters={
-                "MaxTech": lambda model: model.max_tech_level(),
-                "SurvivingLineages": lambda model: model.surviving_lineage_count(),
-                "DominantTrait": lambda model: model.dominant_trait(),
-                "PopulationAgents": lambda model: len(model.populations),
-                "TotalInhabitants": lambda model: model.total_inhabitants(),
-                "OccupiedTiles": lambda model: len(model.populations),
-                "ExpansionEvents": lambda model: model.expansion_events,
-                "AttackEvents": lambda model: model.attack_events,
-                "ConquestEvents": lambda model: model.conquest_events,
-                "GDP": lambda model: model.total_gdp(),
-                "FoodStockpile": lambda model: model.total_food_stockpile(),
-                "RefinedStockpile": lambda model: model.total_refined_stockpile(),
-                "Manufactories": lambda model: model.total_manufactories(),
-            },
-            agent_reporters={
-                "Inhabitants": lambda agent: getattr(agent, "inhabitant_count", None),
-                "TechLevel": lambda agent: getattr(agent, "tech_level", None),
-                "LineageColor": lambda agent: getattr(agent, "lineage_color", None),
-                "NationID": lambda agent: getattr(getattr(agent, "nation", None), "unique_id", None),
-                "Farmers": lambda agent: getattr(agent, "last_farmers", None),
-                "Extractors": lambda agent: getattr(agent, "last_extractors", None),
-                "Manufacturers": lambda agent: getattr(agent, "last_manufacturers", None),
-                "Artisans": lambda agent: getattr(agent, "last_artisans", None),
-            },
-        )
+        model_reporters = {
+            "MaxTech": lambda model: model.max_tech_level(),
+            "SurvivingLineages": lambda model: model.surviving_lineage_count(),
+            "DominantTrait": lambda model: model.dominant_trait(),
+            "PopulationAgents": lambda model: len(model.population_agents),
+            "TotalInhabitants": lambda model: model.total_inhabitants(),
+            "OccupiedTiles": lambda model: len(model.population_agents),
+            "ExpansionEvents": lambda model: model.expansion_events,
+            "AttackEvents": lambda model: model.attack_events,
+            "ConquestEvents": lambda model: model.conquest_events,
+            "GDP": lambda model: model.total_gdp(),
+            "FoodStockpile": lambda model: model.total_food_stockpile(),
+            "RefinedStockpile": lambda model: model.total_refined_stockpile(),
+            "Manufactories": lambda model: model.total_manufactories(),
+        }
+        agent_reporters = {
+            "Inhabitants": lambda agent: getattr(agent, "inhabitant_count", None),
+            "TechLevel": lambda agent: getattr(agent, "tech_level", None),
+            "LineageColor": lambda agent: getattr(agent, "lineage_color", None),
+            "NationID": lambda agent: getattr(getattr(agent, "nation", None), "unique_id", None),
+            "Farmers": lambda agent: getattr(agent, "last_farmers", None),
+            "Extractors": lambda agent: getattr(agent, "last_extractors", None),
+            "Manufacturers": lambda agent: getattr(agent, "last_manufacturers", None),
+            "Artisans": lambda agent: getattr(agent, "last_artisans", None),
+        }
+        try:
+            return CollectorClass(
+                model_reporters=model_reporters,
+                agent_reporters=agent_reporters,
+                collect_agent_records=self.collect_agent_records,
+            )
+        except TypeError:
+            return CollectorClass(
+                model_reporters=model_reporters,
+                agent_reporters=agent_reporters if self.collect_agent_records else {},
+            )
 
     def resource_cells_by_terrain(self, terrain_type: str) -> Iterable[Position]:
         for pos, cell in self.resource_cells.items():
@@ -396,16 +448,39 @@ class WorldModel(mesa.Model):
         include_center: bool = False,
         radius: int = 1,
     ) -> List[Position]:
-        if hasattr(self.grid, "get_neighborhood"):
-            return list(
-                self.grid.get_neighborhood(
+        key = (pos, moore, include_center, radius)
+        cached = self._neighborhood_cache.get(key)
+        if cached is None:
+            cached = tuple(
+                self._compute_neighbor_positions(
                     pos,
                     moore=moore,
                     include_center=include_center,
                     radius=radius,
                 )
             )
-        raise RuntimeError("The configured grid does not support neighborhoods.")
+            self._neighborhood_cache[key] = cached
+        return list(cached)
+
+    def _compute_neighbor_positions(
+        self,
+        pos: Position,
+        moore: bool = True,
+        include_center: bool = False,
+        radius: int = 1,
+    ) -> List[Position]:
+        x, y = pos
+        neighbors: List[Position] = []
+        for dx in range(-radius, radius + 1):
+            for dy in range(-radius, radius + 1):
+                if dx == 0 and dy == 0 and not include_center:
+                    continue
+                if not moore and abs(dx) + abs(dy) > radius:
+                    continue
+                next_pos = (x + dx, y + dy)
+                if 0 <= next_pos[0] < self.width and 0 <= next_pos[1] < self.height:
+                    neighbors.append(next_pos)
+        return neighbors
 
     def resource_cells_near(
         self,
@@ -460,15 +535,25 @@ class WorldModel(mesa.Model):
         )
 
     def populations_near(self, pos: Position) -> List[Population]:
-        agents = self.grid.get_cell_list_contents(
-            self.neighbor_positions(pos, moore=True, include_center=False)
-        )
-        return [agent for agent in agents if isinstance(agent, Population)]
+        return [
+            population
+            for neighbor_pos in self.neighbor_positions(pos, moore=True, include_center=False)
+            if (population := self.population_by_pos.get(neighbor_pos)) is not None
+        ]
 
     def population_at(self, pos: Position) -> Optional[Population]:
+        self._sync_population_index_if_needed()
+        population = self.population_by_pos.get(pos)
+        if population is not None:
+            return population
         agents = self.grid.get_cell_list_contents([pos])
         for agent in agents:
             if isinstance(agent, Population):
+                self.population_by_pos[pos] = agent
+                if agent not in self.population_agents:
+                    self.population_agents.append(agent)
+                if agent.nation is not None:
+                    agent.nation.add_population(agent)
                 return agent
         return None
 
@@ -478,12 +563,12 @@ class WorldModel(mesa.Model):
         target_pos: Position,
         migrants: int,
     ) -> bool:
+        self._sync_population_index_if_needed()
         target_cell = self.resource_cells.get(target_pos)
         if target_cell is None or not target_cell.is_land:
             return False
 
-        occupant = self.population_at(target_pos)
-        if occupant is not None:
+        if target_pos in self.population_by_pos:
             return False
 
         child = Population(
@@ -495,8 +580,7 @@ class WorldModel(mesa.Model):
             nation=parent.nation,
             beliefs=parent.beliefs,
         )
-        self.grid.place_agent(child, target_pos)
-        self.schedule.add(child)
+        self.register_population(child, target_pos)
         self.expansion_events += 1
         return True
 
@@ -506,7 +590,7 @@ class WorldModel(mesa.Model):
             target_cell = self.resource_cells.get(target_pos)
             if target_cell is None or not target_cell.is_land:
                 continue
-            if self.population_at(target_pos) is not None:
+            if target_pos in self.population_by_pos:
                 continue
             candidates.append(target_pos)
 
@@ -529,7 +613,11 @@ class WorldModel(mesa.Model):
         new_nation = attacker.nation
         target_pos = target.pos
 
+        if old_nation is not None and old_nation is not new_nation:
+            old_nation.remove_population(target)
         target.nation = new_nation
+        if new_nation is not None and old_nation is not new_nation:
+            new_nation.add_population(target)
         target._lineage_color = new_nation.lineage_color if new_nation is not None else target._lineage_color
         target._set_beliefs(new_beliefs)
         target.tech_level = new_tech_level
@@ -551,17 +639,17 @@ class WorldModel(mesa.Model):
             old_nation.reassign_capital(self)
 
     def max_tech_level(self) -> int:
-        return max((population.tech_level for population in self.populations), default=0)
+        return max((population.tech_level for population in self.population_agents), default=0)
 
     def surviving_lineage_count(self) -> int:
         return len(self.surviving_nations())
 
     def total_inhabitants(self) -> int:
-        return sum(population.inhabitant_count for population in self.populations)
+        return sum(population.inhabitant_count for population in self.population_agents)
 
     def dominant_trait(self) -> str:
         totals = {key: 0.0 for key in ("military", "economic", "diplomatic", "tech")}
-        for population in self.populations:
+        for population in self.population_agents:
             for key, value in population.traits.items():
                 totals[key] += value * population.inhabitant_count
         if not totals or sum(totals.values()) <= 0:
@@ -584,6 +672,7 @@ class WorldModel(mesa.Model):
         return 1 if self.total_manufactories() > 0 else 0
 
     def step(self) -> None:
+        self._sync_population_index_if_needed()
         self._age_attack_arrows()
         self._reset_tick_state()
         self._run_population_production()
@@ -610,26 +699,28 @@ class WorldModel(mesa.Model):
             nation.reset_tick()
         for cell in self.resource_cells.values():
             cell.reset_tick_production()
-        for population in self.populations:
+        for population in self.population_agents:
             population.reset_tick_production()
 
     def _run_population_production(self) -> None:
-        for population in sorted(self.populations, key=lambda item: item.unique_id):
+        for population in self.population_snapshot():
             population.produce_goods()
 
     def _run_population_consumption_and_growth(self) -> None:
-        for population in sorted(self.populations, key=lambda item: item.unique_id):
+        for population in self.population_snapshot():
             population.consume_goods()
             population.diffuse_tech()
             population.advance_tech()
             population.drift_traits()
 
     def _run_conflict_and_expansion(self) -> None:
-        for population in sorted(list(self.populations), key=lambda item: item.unique_id):
-            if population in self.populations:
+        active = set(self.population_agents)
+        for population in self.population_snapshot():
+            if population in active:
                 population.maybe_attack_neighbor()
-        for population in sorted(list(self.populations), key=lambda item: item.unique_id):
-            if population in self.populations:
+        active = set(self.population_agents)
+        for population in self.population_snapshot():
+            if population in active:
                 population.expand_or_migrate()
 
     def _run_nation_investment(self) -> None:
@@ -638,7 +729,7 @@ class WorldModel(mesa.Model):
 
     def redistribute_local_raw_goods(self) -> None:
         deltas = {pos: 0.0 for pos in self.resource_cells}
-        for source_population in self.populations:
+        for source_population in self.population_agents:
             source_pos = source_population.pos
             source_cell = self.resource_cell_at(source_pos)
             if source_cell is None or source_cell.raw_goods_stockpile <= 0:
@@ -651,7 +742,7 @@ class WorldModel(mesa.Model):
                 include_center=True,
                 radius=1,
             ):
-                recipient_population = self.population_at(pos)
+                recipient_population = self.population_by_pos.get(pos)
                 if recipient_population is None:
                     continue
                 if recipient_population.nation is not source_population.nation:
@@ -712,7 +803,7 @@ class WorldModel(mesa.Model):
         terrain_rgb = self.render_rgb_array(map_mode=normalized_mode)
         global_max_population = self.global_max_population()
         if normalized_mode not in ENVIRONMENTAL_MAP_MODES:
-            for population in self.populations:
+            for population in self.population_agents:
                 x, y = population.pos
                 terrain_rgb[y, x] = self.population_rgb(
                     population,
@@ -799,7 +890,7 @@ class WorldModel(mesa.Model):
         return rgb
 
     def global_max_population(self) -> int:
-        return max((population.inhabitant_count for population in self.populations), default=1)
+        return max((population.inhabitant_count for population in self.population_agents), default=1)
 
     def population_rgb(
         self,

@@ -66,12 +66,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=60,
         help="Interactive viewer frame limit.",
     )
+    parser.add_argument(
+        "--collect-agent-records",
+        action="store_true",
+        help="Collect full per-agent history in addition to model-level history.",
+    )
     return parser
 
 
 def print_summary(model: WorldModel, output: Optional[Path] = None) -> None:
-    model_data = model.datacollector.get_model_vars_dataframe()
-    latest = model_data.iloc[-1].to_dict()
+    latest = getattr(model.datacollector, "latest_model_record", None)
+    if latest is None:
+        model_data = model.datacollector.get_model_vars_dataframe()
+        latest = model_data.iloc[-1].to_dict()
 
     if output:
         print(f"Rendered world to {output}")
@@ -97,6 +104,7 @@ def main() -> None:
         height=args.height,
         initial_populations=args.populations,
         seed=args.seed,
+        collect_agent_records=args.collect_agent_records,
     )
 
     for _ in range(args.steps):

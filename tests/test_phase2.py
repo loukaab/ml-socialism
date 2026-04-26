@@ -67,8 +67,7 @@ def add_population(
         nation=nation,
         beliefs=FIXED_BELIEFS,
     )
-    model.grid.place_agent(population, pos)
-    model.schedule.add(population)
+    model.register_population(population, pos)
     return population
 
 
@@ -454,6 +453,87 @@ class Phase2MacroeconomicsTests(unittest.TestCase):
         self.assertIsNotNone(model.population_at(target))
         self.assertEqual(model.population_at(target).inhabitant_count, expected_migrants)
         self.assertEqual(population.inhabitant_count, population_count - expected_migrants)
+
+    def test_population_indexes_match_seeded_and_expanded_populations(self):
+        model = WorldModel(width=6, height=6, initial_populations=2, seed=5)
+        for population in model.populations:
+            self.assertIs(model.population_at(population.pos), population)
+            self.assertIs(model.population_by_pos[population.pos], population)
+
+        parent = model.populations[0]
+        target = model.best_expansion_targets(parent.pos)[0]
+        self.assertTrue(model.attempt_expansion(parent, target, migrants=14))
+        child = model.population_at(target)
+
+        self.assertIsNotNone(child)
+        self.assertIn(child, model.population_agents)
+        self.assertIn(child, child.nation.population_agents)
+        self.assertEqual(len(model.population_agents), len(model.populations))
+
+    def test_conquest_updates_nation_membership_index(self):
+        model = WorldModel(width=4, height=3, initial_populations=0, seed=1)
+        attacker_pos = (1, 1)
+        defender_pos = (2, 1)
+        force_land(model, attacker_pos)
+        force_land(model, defender_pos)
+        attacker_nation = model.create_nation("#e83f6f", attacker_pos)
+        defender_nation = model.create_nation("#a855f7", defender_pos)
+        attacker = add_population(model, attacker_pos, count=50, nation=attacker_nation)
+        defender = add_population(model, defender_pos, count=20, nation=defender_nation)
+
+        model.handle_conquest(attacker, defender, 25, attacker.beliefs, attacker.tech_level)
+
+        self.assertNotIn(defender, defender_nation.population_agents)
+        self.assertIn(defender, attacker_nation.population_agents)
+        self.assertIs(model.population_at(defender_pos), defender)
+
+    def test_populations_near_matches_grid_contents_order(self):
+        model = WorldModel(width=4, height=4, initial_populations=0, seed=1)
+        center = (1, 1)
+        positions = [(0, 0), (1, 0), (2, 1), (1, 2)]
+        for pos in [center, *positions]:
+            force_land(model, pos)
+        nation = model.create_nation("#e83f6f", center)
+        for index, pos in enumerate(positions):
+            add_population(model, pos, count=10 + index, nation=nation)
+
+        expected = [
+            agent
+            for agent in model.grid.get_cell_list_contents(
+                model.neighbor_positions(center, moore=True, include_center=False)
+            )
+            if isinstance(agent, Population)
+        ]
+
+        self.assertEqual(model.populations_near(center), expected)
+
+    def test_compatibility_calls_do_not_change_seeded_determinism(self):
+        plain = WorldModel(width=10, height=8, initial_populations=3, seed=11)
+        noisy = WorldModel(width=10, height=8, initial_populations=3, seed=11)
+
+        for _ in range(20):
+            _ = noisy.populations
+            for population in noisy.populations[:2]:
+                noisy.population_at(population.pos)
+                noisy.populations_near(population.pos)
+            noisy.surviving_nations()
+            noisy.datacollector.get_model_vars_dataframe()
+            plain.step()
+            noisy.step()
+
+        plain_latest = plain.datacollector.get_model_vars_dataframe().iloc[-1]
+        noisy_latest = noisy.datacollector.get_model_vars_dataframe().iloc[-1]
+        keys = [
+            "PopulationAgents",
+            "TotalInhabitants",
+            "ExpansionEvents",
+            "AttackEvents",
+            "ConquestEvents",
+            "SurvivingLineages",
+            "Manufactories",
+        ]
+        for key in keys:
+            self.assertEqual(plain_latest[key], noisy_latest[key])
 
     def test_cli_accepts_new_modes_and_legacy_resources_alias(self):
         parser = build_parser()

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Optional
 
 if TYPE_CHECKING:
@@ -45,6 +45,7 @@ class NationManager:
     total_food_produced: float = 0.0
     total_refined_produced: float = 0.0
     defeated: bool = False
+    population_agents: List["Population"] = field(default_factory=list, repr=False)
 
     @property
     def gdp(self) -> float:
@@ -59,7 +60,15 @@ class NationManager:
         self.total_refined_produced += max(0.0, float(refined))
 
     def controlled_populations(self, model: "WorldModel") -> List["Population"]:
-        return [population for population in model.populations if population.nation is self]
+        return list(self.population_agents)
+
+    def add_population(self, population: "Population") -> None:
+        if population not in self.population_agents:
+            self.population_agents.append(population)
+
+    def remove_population(self, population: "Population") -> None:
+        if population in self.population_agents:
+            self.population_agents.remove(population)
 
     def controlled_positions(self, model: "WorldModel") -> list["Position"]:
         return [
@@ -92,6 +101,7 @@ class NationManager:
         self.refined_stockpile = 0.0
         self.capital_pos = None
         self.defeated = True
+        self.population_agents.clear()
 
     def invest_in_manufactory(self, model: "WorldModel") -> bool:
         cost = model.economy_config.manufactory_cost

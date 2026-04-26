@@ -255,7 +255,7 @@ class InteractiveViewer:
                 pygame.draw.rect(self.screen, color, rect)
 
         if normalize_map_mode(self.map_mode) not in ENVIRONMENTAL_MAP_MODES:
-            self.draw_owned_tiles()
+            self.draw_owned_tiles(start_x, start_y, end_x, end_y)
         self.draw_lineage_borders(start_x, start_y, end_x, end_y)
         self.draw_attack_arrows()
         self.draw_capital_stars()
@@ -283,19 +283,28 @@ class InteractiveViewer:
                 1,
             )
 
-    def draw_owned_tiles(self) -> None:
+    def draw_owned_tiles(
+        self,
+        start_x: int,
+        start_y: int,
+        end_x: int,
+        end_y: int,
+    ) -> None:
         tile = max(1, int(self.tile_size + 1))
         global_max_population = self.model.global_max_population()
-        for population in self.model.populations:
-            x, y = population.pos
-            color = self.population_tile_color(population, global_max_population)
-            rect = pygame.Rect(
-                int(self.camera_x + x * self.tile_size),
-                int(self.camera_y + y * self.tile_size),
-                tile,
-                tile,
-            )
-            pygame.draw.rect(self.screen, color, rect)
+        for y in range(start_y, end_y):
+            for x in range(start_x, end_x):
+                population = self.model.population_by_pos.get((x, y))
+                if population is None:
+                    continue
+                color = self.population_tile_color(population, global_max_population)
+                rect = pygame.Rect(
+                    int(self.camera_x + x * self.tile_size),
+                    int(self.camera_y + y * self.tile_size),
+                    tile,
+                    tile,
+                )
+                pygame.draw.rect(self.screen, color, rect)
 
     def draw_lineage_borders(
         self,
@@ -307,7 +316,7 @@ class InteractiveViewer:
         thickness = max(2, min(6, int(self.tile_size * 0.16)))
         for y in range(start_y, end_y):
             for x in range(start_x, end_x):
-                population = self.model.population_at((x, y))
+                population = self.model.population_by_pos.get((x, y))
                 if population is None:
                     continue
 
@@ -328,7 +337,7 @@ class InteractiveViewer:
     def has_border(self, population, neighbor_x: int, neighbor_y: int) -> bool:
         if not (0 <= neighbor_x < self.model.width and 0 <= neighbor_y < self.model.height):
             return True
-        neighbor = self.model.population_at((neighbor_x, neighbor_y))
+        neighbor = self.model.population_by_pos.get((neighbor_x, neighbor_y))
         if neighbor is None:
             return True
         return neighbor.nation is not population.nation
@@ -553,7 +562,9 @@ class InteractiveViewer:
         return pygame.Rect(26, 24 + row_count * 24 + 8, 200, 8)
 
     def status_rows(self) -> list[str]:
-        latest = self.model.datacollector.get_model_vars_dataframe().iloc[-1]
+        latest = getattr(self.model.datacollector, "latest_model_record", None)
+        if latest is None:
+            latest = self.model.datacollector.get_model_vars_dataframe().iloc[-1]
         hover_text = self.hover_text()
         return [
             f"Step {int(latest['Step'])}",
