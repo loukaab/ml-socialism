@@ -18,15 +18,17 @@ class EconomyConfig:
     starter_artisans: int = 10
     farmer_slot_scale: int = 120
     extractor_slot_scale: int = 80
-    food_per_farmer: float = 4.0
+    food_per_farmer: float = 1
     raw_per_extractor: float = 1.0
     manufacturer_jobs_per_level: int = 25
-    artisan_raw_throughput: float = 1.0
-    manufacturer_raw_throughput: float = 5.0
-    food_need_per_person: float = 1.0
-    refined_need_per_person: float = 0.04
+    artisan_raw_throughput: float = 0.1
+    manufacturer_raw_throughput: float = 1
+    food_need_per_person: float = 0.5
+    food_claim_multiplier: float = 1.2
+    food_per_new_person: float = 5.0
+    refined_need_per_person: float = 0.01
     food_deficit_loss_rate: float = 0.02
-    manufactory_cost: float = 250.0
+    manufactory_cost: float = 10000
     local_logistics_period: int = 10
     center_lps_weight: float = 1.5
 
@@ -101,6 +103,8 @@ class NationManager:
             cell = model.resource_cell_at(population.pos)
             if cell is None:
                 continue
+            if cell.manufactory_level >= 1:
+                continue
             candidates.append((population.last_artisans, population.inhabitant_count, population.pos, cell))
 
         if not candidates:
@@ -109,5 +113,5 @@ class NationManager:
         candidates.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
         _, _, _, cell = candidates[0]
         self.refined_stockpile -= cost
-        cell.manufactory_level += 1
+        cell.manufactory_level = 1
         return True

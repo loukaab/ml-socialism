@@ -127,6 +127,9 @@ class ResourceCell(mesa.Agent):
         self.last_manufacturers = 0
         self.last_artisans = 0
         self.last_food_produced = 0.0
+        self.last_food_claimed = 0.0
+        self.last_birth_food = 0.0
+        self.last_new_inhabitants = 0
         self.last_raw_extracted = 0.0
         self.last_refined_produced = 0.0
 
@@ -241,6 +244,9 @@ class Population(mesa.Agent):
         self.last_manufacturers = 0
         self.last_artisans = 0
         self.last_food_produced = 0.0
+        self.last_food_claimed = 0.0
+        self.last_birth_food = 0.0
+        self.last_new_inhabitants = 0
         self.last_raw_extracted = 0.0
         self.last_refined_produced = 0.0
 
@@ -254,7 +260,8 @@ class Population(mesa.Agent):
 
         farmer_slots = max(0, int(cell.arable_value * config.farmer_slot_scale))
         extractor_slots = max(0, int(cell.raw_goods_value * config.extractor_slot_scale))
-        manufacturer_slots = max(0, cell.manufactory_level * config.manufacturer_jobs_per_level)
+        manufactory_level = min(max(0, cell.manufactory_level), 1)
+        manufacturer_slots = max(0, manufactory_level * config.manufacturer_jobs_per_level)
 
         starter_jobs = self.starter_job_targets(min(total_people, config.starter_population_band))
         farmers = min(starter_jobs.farmers, farmer_slots)
@@ -388,13 +395,12 @@ class Population(mesa.Agent):
 
         config = self.model.economy_config
         food_need = self.inhabitant_count * config.food_need_per_person
-        refined_need = self.inhabitant_count * config.refined_need_per_person
+        food_claim_target = food_need * config.food_claim_multiplier
+        claimed_food = self.claim_food(food_claim_target)
+        self.last_food_claimed = claimed_food
 
-        unmet_food = self.consume_one_good(
-            need=food_need,
-            local_amount=self.last_food_produced,
-            stockpile_name="food_stockpile",
-        )
+        unmet_food = max(0.0, food_need - claimed_food)
+        birth_food = 0.0
         if unmet_food > 0:
             self.food_deficit_ticks += 1
             loss = int(math.ceil(unmet_food * self.food_deficit_ticks * config.food_deficit_loss_rate))
@@ -402,7 +408,10 @@ class Population(mesa.Agent):
                 self.inhabitant_count = max(1, self.inhabitant_count - loss)
         else:
             self.food_deficit_ticks = 0
+            birth_food = max(0.0, claimed_food - food_need)
+        self.last_birth_food = birth_food
 
+        refined_need = self.inhabitant_count * config.refined_need_per_person
         unmet_refined = self.consume_one_good(
             need=refined_need,
             local_amount=self.last_refined_produced,
@@ -416,7 +425,42 @@ class Population(mesa.Agent):
             self.refined_deficit_ticks = 0
             self.refined_growth_multiplier = 1.0
 
+        self.grow_from_food(birth_food)
         self.stockpile = self.nation.food_stockpile
+
+    def claim_food(self, claim_target: float) -> float:
+        local_food = max(0.0, self.last_food_produced)
+        if claim_target <= 0:
+            self.nation.food_stockpile += local_food
+            return 0.0
+
+        local_claim = min(local_food, claim_target)
+        local_surplus = max(0.0, local_food - claim_target)
+        if local_surplus > 0:
+            self.nation.food_stockpile += local_surplus
+
+        remaining_claim = claim_target - local_claim
+        if remaining_claim <= 0:
+            return local_claim
+
+        pulled = min(self.nation.food_stockpile, remaining_claim)
+        self.nation.food_stockpile -= pulled
+        return local_claim + pulled
+
+    def grow_from_food(self, birth_food: float) -> None:
+        config = self.model.economy_config
+        self.last_new_inhabitants = 0
+        if birth_food <= 0 or config.food_per_new_person <= 0:
+            return
+
+        potential_births = (birth_food / config.food_per_new_person) * self.refined_growth_multiplier
+        total_births = potential_births + self.growth_remainder
+        new_inhabitants = int(total_births)
+        self.growth_remainder = total_births - new_inhabitants
+        if new_inhabitants <= 0:
+            return
+        self.inhabitant_count += new_inhabitants
+        self.last_new_inhabitants = new_inhabitants
 
     def consume_one_good(
         self,
@@ -505,7 +549,7 @@ class Population(mesa.Agent):
             0.1,
             target.diplomatic_output() - self.diplomatic_output() + 1.0,
         )
-        carrying_capacity = max(1.0, self.model.carrying_capacity_at(self.pos))
+        carrying_capacity = max(1.0, self.model.food_growth_capacity_for_population(self))
         pop_pressure = self.inhabitant_count / carrying_capacity
         attack_chance = min(
             1.0,
@@ -567,7 +611,7 @@ class Population(mesa.Agent):
         return False
 
     def expand_or_migrate(self) -> None:
-        capacity = self.model.carrying_capacity_at(self.pos)
+        capacity = self.model.food_growth_capacity_for_population(self)
         if capacity <= 0:
             return
         if self.inhabitant_count < capacity * self.model.expansion_pressure_threshold:
@@ -590,26 +634,13 @@ class Population(mesa.Agent):
                 break
 
     def grow_logistically(self) -> None:
-        capacity = self.model.carrying_capacity_at(self.pos)
-        if capacity <= 0:
-            return
-
-        economic_bonus = 1.0 + (self.economic_output() * 0.05)
-        growth_rate = self.model.population_growth_rate * economic_bonus
-        population = float(self.inhabitant_count)
-        delta = growth_rate * population * (1.0 - population / capacity)
-        if delta > 0:
-            delta *= self.refined_growth_multiplier
-        next_population = max(1.0, population + delta + self.growth_remainder)
-        self.inhabitant_count = max(1, int(next_population))
-        self.growth_remainder = next_population - self.inhabitant_count
+        return None
 
     def step(self) -> None:
         self.produce_goods()
         self.consume_goods()
         self.diffuse_tech()
         self.advance_tech()
-        self.grow_logistically()
         self.drift_traits()
         self.maybe_attack_neighbor()
         self.expand_or_migrate()

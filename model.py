@@ -430,8 +430,34 @@ class WorldModel(mesa.Model):
         return float(self.arable_map[y, x])
 
     def carrying_capacity_at(self, pos: Position) -> float:
-        x, y = pos
-        return float(self.carrying_capacity_map[y, x])
+        return self.food_growth_capacity_at(pos)
+
+    def max_farmers_at(self, pos: Position) -> int:
+        cell = self.resource_cell_at(pos)
+        if cell is None or not cell.is_land:
+            return 0
+        return max(0, int(cell.arable_value * self.economy_config.farmer_slot_scale))
+
+    def max_food_output_at(self, pos: Position, tech_multiplier: float = 1.0) -> float:
+        farmers = self.max_farmers_at(pos)
+        return farmers * self.economy_config.food_per_farmer * max(0.0, tech_multiplier)
+
+    def food_growth_capacity_at(self, pos: Position, tech_multiplier: float = 1.0) -> float:
+        denominator = (
+            self.economy_config.food_need_per_person
+            * self.economy_config.food_claim_multiplier
+        )
+        if denominator <= 0:
+            return 0.0
+        return self.max_food_output_at(pos, tech_multiplier=tech_multiplier) / denominator
+
+    def food_growth_capacity_for_population(self, population: Population) -> float:
+        if population.pos is None:
+            return 0.0
+        return self.food_growth_capacity_at(
+            population.pos,
+            tech_multiplier=population.tech_multiplier,
+        )
 
     def populations_near(self, pos: Position) -> List[Population]:
         agents = self.grid.get_cell_list_contents(
@@ -486,7 +512,7 @@ class WorldModel(mesa.Model):
 
         self.python_random.shuffle(candidates)
         candidates.sort(
-            key=lambda candidate: self.carrying_capacity_at(candidate),
+            key=lambda candidate: self.food_growth_capacity_at(candidate),
             reverse=True,
         )
         return candidates
@@ -552,10 +578,10 @@ class WorldModel(mesa.Model):
         return sum(nation.refined_stockpile for nation in self.surviving_nations())
 
     def total_manufactories(self) -> int:
-        return sum(cell.manufactory_level for cell in self.resource_cells.values())
+        return sum(1 for cell in self.resource_cells.values() if cell.manufactory_level > 0)
 
     def max_manufactory_level(self) -> int:
-        return max((cell.manufactory_level for cell in self.resource_cells.values()), default=0)
+        return 1 if self.total_manufactories() > 0 else 0
 
     def step(self) -> None:
         self._age_attack_arrows()
@@ -596,7 +622,6 @@ class WorldModel(mesa.Model):
             population.consume_goods()
             population.diffuse_tech()
             population.advance_tech()
-            population.grow_logistically()
             population.drift_traits()
 
     def _run_conflict_and_expansion(self) -> None:
@@ -756,9 +781,8 @@ class WorldModel(mesa.Model):
             )
         if map_mode == "manufactories":
             values = np.zeros((self.height, self.width), dtype=float)
-            max_level = max(1, self.max_manufactory_level())
             for (x, y), cell in self.resource_cells.items():
-                values[y, x] = cell.manufactory_level / max_level
+                values[y, x] = 1.0 if cell.manufactory_level > 0 else 0.0
             return self.scalar_rgb_array(
                 values,
                 low=np.array((0.22, 0.29, 0.32)),

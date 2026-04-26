@@ -35,6 +35,22 @@ def force_land(model: WorldModel, pos, arable: float = 1.0, raw: float = 1.0):
     return cell
 
 
+def force_water(model: WorldModel, pos):
+    x, y = pos
+    model.terrain_map[y, x] = False
+    model.arable_map[y, x] = 0.0
+    model.raw_goods_map[y, x] = 0.0
+    model.resource_map[y, x] = 0.0
+    model.carrying_capacity_map[y, x] = 0.0
+    cell = model.resource_cell_at(pos)
+    cell.terrain_type = "Water"
+    cell.arable_value = 0.0
+    cell.raw_goods_value = 0.0
+    cell.resource_value = 0.0
+    cell.carrying_capacity = 0.0
+    return cell
+
+
 def add_population(
     model: WorldModel,
     pos,
@@ -57,7 +73,7 @@ def add_population(
 
 
 class Phase2MacroeconomicsTests(unittest.TestCase):
-    def test_arable_raw_independent_and_capacity_from_arable(self):
+    def test_arable_raw_independent_and_legacy_capacity_map_from_arable(self):
         model = WorldModel(width=20, height=15, initial_populations=0, seed=3)
 
         self.assertFalse(np.allclose(model.arable_map, model.raw_goods_map))
@@ -72,6 +88,15 @@ class Phase2MacroeconomicsTests(unittest.TestCase):
         expected_capacity[~model.terrain_map] = 0.0
         np.testing.assert_allclose(model.carrying_capacity_map, expected_capacity)
 
+    def test_carrying_capacity_wrapper_is_food_growth_capacity(self):
+        model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
+        pos = (1, 1)
+        force_land(model, pos, arable=0.5, raw=1.0)
+
+        expected_capacity = 60 * 4.0 / 1.2
+
+        self.assertAlmostEqual(model.carrying_capacity_at(pos), expected_capacity)
+
     def test_job_waterfall_and_manufacturer_throughput(self):
         model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
         pos = (1, 1)
@@ -85,12 +110,12 @@ class Phase2MacroeconomicsTests(unittest.TestCase):
 
         self.assertEqual(population.last_farmers, 60)
         self.assertEqual(population.last_extractors, 40)
-        self.assertEqual(population.last_manufacturers, 50)
-        self.assertEqual(population.last_artisans, 50)
+        self.assertEqual(population.last_manufacturers, 25)
+        self.assertEqual(population.last_artisans, 75)
         self.assertEqual(population.last_food_produced, 240.0)
-        self.assertEqual(population.last_refined_produced, 300.0)
-        self.assertEqual(cell.raw_goods_stockpile, 740.0)
-        self.assertEqual(nation.gdp, 1140.0)
+        self.assertEqual(population.last_refined_produced, 200.0)
+        self.assertEqual(cell.raw_goods_stockpile, 840.0)
+        self.assertEqual(nation.gdp, 840.0)
 
     def test_first_sixty_use_starter_job_distribution(self):
         model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
@@ -147,7 +172,9 @@ class Phase2MacroeconomicsTests(unittest.TestCase):
 
         self.assertEqual(population.food_deficit_ticks, 0)
         self.assertEqual(population.refined_deficit_ticks, 0)
-        self.assertAlmostEqual(nation.food_stockpile, 5.0)
+        self.assertAlmostEqual(nation.food_stockpile, 3.0)
+        self.assertAlmostEqual(population.last_birth_food, 2.0)
+        self.assertAlmostEqual(population.growth_remainder, 0.4)
         self.assertAlmostEqual(nation.refined_stockpile, 0.6)
 
         nation.food_stockpile = 0.0
@@ -160,6 +187,87 @@ class Phase2MacroeconomicsTests(unittest.TestCase):
         self.assertEqual(population.refined_deficit_ticks, 1)
         self.assertEqual(population.inhabitant_count, 9)
         self.assertEqual(population.refined_growth_multiplier, 0.0)
+
+    def test_food_below_consumption_causes_deficit_and_no_growth(self):
+        model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
+        pos = (1, 1)
+        force_land(model, pos)
+        nation = model.create_nation("#e83f6f", pos)
+        population = add_population(model, pos, count=10, nation=nation)
+
+        population.last_food_produced = 5.0
+        population.last_refined_produced = 1.0
+        population.consume_goods()
+
+        self.assertEqual(population.food_deficit_ticks, 1)
+        self.assertEqual(population.inhabitant_count, 9)
+        self.assertEqual(population.last_birth_food, 0.0)
+        self.assertEqual(population.growth_remainder, 0.0)
+
+    def test_food_at_110_percent_generates_partial_growth_without_stockpile_draw(self):
+        model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
+        pos = (1, 1)
+        force_land(model, pos)
+        nation = model.create_nation("#e83f6f", pos)
+        population = add_population(model, pos, count=10, nation=nation)
+
+        population.last_food_produced = 11.0
+        population.last_refined_produced = 1.0
+        population.consume_goods()
+
+        self.assertEqual(population.food_deficit_ticks, 0)
+        self.assertAlmostEqual(nation.food_stockpile, 0.0)
+        self.assertAlmostEqual(population.last_birth_food, 1.0)
+        self.assertAlmostEqual(population.growth_remainder, 0.2)
+
+    def test_food_stockpile_can_fill_to_120_percent_for_growth(self):
+        model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
+        pos = (1, 1)
+        force_land(model, pos)
+        nation = model.create_nation("#e83f6f", pos, food_stockpile=2.0)
+        population = add_population(model, pos, count=10, nation=nation)
+
+        population.last_food_produced = 10.0
+        population.last_refined_produced = 1.0
+        population.consume_goods()
+
+        self.assertEqual(population.food_deficit_ticks, 0)
+        self.assertAlmostEqual(nation.food_stockpile, 0.0)
+        self.assertAlmostEqual(population.last_food_claimed, 12.0)
+        self.assertAlmostEqual(population.last_birth_food, 2.0)
+        self.assertAlmostEqual(population.growth_remainder, 0.4)
+
+    def test_food_above_120_percent_sends_surplus_to_stockpile(self):
+        model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
+        pos = (1, 1)
+        force_land(model, pos)
+        nation = model.create_nation("#e83f6f", pos)
+        population = add_population(model, pos, count=10, nation=nation)
+
+        population.last_food_produced = 20.0
+        population.last_refined_produced = 1.0
+        population.consume_goods()
+
+        self.assertAlmostEqual(population.last_food_claimed, 12.0)
+        self.assertAlmostEqual(population.last_birth_food, 2.0)
+        self.assertAlmostEqual(nation.food_stockpile, 8.0)
+
+    def test_refined_deficit_still_stalls_food_generated_growth(self):
+        model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
+        pos = (1, 1)
+        force_land(model, pos)
+        nation = model.create_nation("#e83f6f", pos)
+        population = add_population(model, pos, count=10, nation=nation)
+
+        population.last_food_produced = 12.0
+        population.last_refined_produced = 0.0
+        population.consume_goods()
+
+        self.assertEqual(population.refined_deficit_ticks, 1)
+        self.assertEqual(population.refined_growth_multiplier, 0.0)
+        self.assertAlmostEqual(population.last_birth_food, 2.0)
+        self.assertEqual(population.growth_remainder, 0.0)
+        self.assertEqual(population.inhabitant_count, 10)
 
     def test_lps_raw_goods_distribution_uses_center_bias_and_same_nation(self):
         model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
@@ -236,6 +344,40 @@ class Phase2MacroeconomicsTests(unittest.TestCase):
         self.assertEqual(model.resource_cell_at(low).manufactory_level, 0)
         self.assertEqual(model.resource_cell_at(high).manufactory_level, 1)
         self.assertEqual(nation.refined_stockpile, 0.0)
+
+    def test_investment_cannot_build_second_manufactory_on_tile(self):
+        model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
+        pos = (1, 1)
+        cell = force_land(model, pos)
+        cell.manufactory_level = 1
+        nation = model.create_nation("#e83f6f", pos, refined_stockpile=250.0)
+        population = add_population(model, pos, count=20, nation=nation)
+        population.last_artisans = 20
+
+        invested = nation.invest_in_manufactory(model)
+
+        self.assertFalse(invested)
+        self.assertEqual(cell.manufactory_level, 1)
+        self.assertEqual(nation.refined_stockpile, 250.0)
+
+    def test_expansion_uses_food_growth_capacity_threshold(self):
+        model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
+        for y in range(model.height):
+            for x in range(model.width):
+                force_water(model, (x, y))
+        center = (1, 1)
+        target = (2, 1)
+        force_land(model, center, arable=0.5, raw=1.0)
+        force_land(model, target, arable=1.0, raw=1.0)
+        nation = model.create_nation("#e83f6f", center)
+        population = add_population(model, center, count=140, nation=nation)
+
+        population.expand_or_migrate()
+
+        self.assertEqual(model.expansion_events, 1)
+        self.assertIsNotNone(model.population_at(target))
+        self.assertEqual(model.population_at(target).inhabitant_count, 30)
+        self.assertEqual(population.inhabitant_count, 110)
 
     def test_cli_accepts_new_modes_and_legacy_resources_alias(self):
         parser = build_parser()

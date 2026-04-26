@@ -529,8 +529,7 @@ class InteractiveViewer:
             return lerp_color(LOW_RAW_COLOR, HIGH_RAW_COLOR, float(self.model.raw_goods_map[y, x]))
         if mode == "manufactories":
             cell = self.model.resource_cell_at((x, y))
-            max_level = max(1, self.model.max_manufactory_level())
-            value = 0.0 if cell is None else cell.manufactory_level / max_level
+            value = 0.0 if cell is None or cell.manufactory_level <= 0 else 1.0
             return lerp_color(LOW_FACTORY_COLOR, HIGH_FACTORY_COLOR, value)
         return LAND_COLOR
 
