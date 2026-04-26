@@ -28,6 +28,8 @@ class EconomyConfig:
     food_per_new_person: float = 5.0
     refined_need_per_person: float = 0.01
     food_deficit_loss_rate: float = 0.02
+    combat_refined_base_cost: float = 10.0
+    combat_refined_cost_per_tech_level: float = 5.0
     manufactory_cost: float = 10000
     local_logistics_period: int = 10
     center_lps_weight: float = 1.5

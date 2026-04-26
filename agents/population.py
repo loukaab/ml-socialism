@@ -588,6 +588,8 @@ class Population(mesa.Agent):
         plan = plans[0]
         if self.model.rng.random() >= plan.attack_chance:
             return False
+        if not self.pay_combat_refined_cost():
+            return False
 
         self.model.register_attack_arrow(self.pos, plan.target.pos)
         self.inhabitant_count -= plan.actual_force
@@ -609,6 +611,24 @@ class Population(mesa.Agent):
             )
             return True
         return False
+
+    def combat_refined_cost(self) -> float:
+        config = self.model.economy_config
+        return (
+            config.combat_refined_base_cost
+            + config.combat_refined_cost_per_tech_level * self.tech_level
+        )
+
+    def pay_combat_refined_cost(self) -> bool:
+        if self.nation is None:
+            return False
+
+        cost = self.combat_refined_cost()
+        if self.nation.refined_stockpile < cost:
+            return False
+
+        self.nation.refined_stockpile -= cost
+        return True
 
     def expand_or_migrate(self) -> None:
         capacity = self.model.food_growth_capacity_for_population(self)
