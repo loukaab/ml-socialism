@@ -35,7 +35,7 @@ class EconomyConfig:
     devastation_max: float = 100.0
     devastation_capture_increase: float = 1.0
     devastation_failed_attack_increase: float = 0.5
-    devastation_recovery_period: int = 10
+    devastation_recovery_period: int = 100
     devastation_recovery_amount: float = 1.0
     local_logistics_period: int = 10
     center_lps_weight: float = 1.5
