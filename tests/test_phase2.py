@@ -88,6 +88,11 @@ def add_population(
     return population
 
 
+def regenerate_navigation(model: WorldModel):
+    model.continent_map = model._generate_continents()
+    model.naval_crossings = model._generate_naval_crossings()
+
+
 class Phase2MacroeconomicsTests(unittest.TestCase):
     def test_arable_raw_independent_and_legacy_capacity_map_from_arable(self):
         model = WorldModel(width=20, height=15, initial_populations=0, seed=3)
@@ -935,6 +940,170 @@ class Phase2MacroeconomicsTests(unittest.TestCase):
         self.assertLess(float(raw_rgb[high[1], high[0]].sum()), float(raw_rgb[low[1], low[0]].sum()))
         self.assertLess(float(devastation_rgb[low[1], low[0], 0]), 0.01)
         self.assertGreater(float(devastation_rgb[high[1], high[0], 0]), 0.99)
+
+    def test_continent_generation_uses_moore_connectivity(self):
+        model = WorldModel(width=5, height=5, initial_populations=0, seed=1)
+        for y in range(model.height):
+            for x in range(model.width):
+                force_water(model, (x, y))
+        force_land(model, (1, 1))
+        force_land(model, (2, 2))
+        force_land(model, (4, 4))
+
+        regenerate_navigation(model)
+
+        first = model.continent_map[1, 1]
+        diagonal = model.continent_map[2, 2]
+        separate = model.continent_map[4, 4]
+        self.assertEqual(model.continent_map[0, 0], 0)
+        self.assertGreater(first, 0)
+        self.assertEqual(first, diagonal)
+        self.assertNotEqual(first, separate)
+
+    def test_naval_crossings_cover_up_to_three_water_tiles_only(self):
+        model = WorldModel(width=7, height=3, initial_populations=0, seed=1)
+        for y in range(model.height):
+            for x in range(model.width):
+                force_water(model, (x, y))
+        origin = (0, 1)
+        reachable = (4, 1)
+        too_far = (6, 1)
+        force_land(model, origin)
+        force_land(model, reachable)
+        force_land(model, too_far)
+
+        regenerate_navigation(model)
+
+        self.assertIn(reachable, model.naval_crossings[origin])
+        self.assertNotIn(too_far, model.naval_crossings[origin])
+        self.assertEqual(
+            model.naval_crossings[origin],
+            sorted(set(model.naval_crossings[origin]), key=lambda item: (item[1], item[0])),
+        )
+
+    def test_naval_crossings_ignore_same_continent_land(self):
+        model = WorldModel(width=5, height=5, initial_populations=0, seed=1)
+        for y in range(model.height):
+            for x in range(model.width):
+                force_land(model, (x, y))
+        force_water(model, (2, 2))
+        origin = (1, 2)
+        same_continent_target = (3, 2)
+
+        regenerate_navigation(model)
+
+        self.assertEqual(model.continent_map[origin[1], origin[0]], model.continent_map[same_continent_target[1], same_continent_target[0]])
+        self.assertNotIn(origin, model.naval_crossings)
+
+    def test_naval_expansion_requires_dynamic_threshold(self):
+        model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
+        for y in range(model.height):
+            for x in range(model.width):
+                force_water(model, (x, y))
+        origin = (0, 1)
+        target = (2, 1)
+        force_land(model, origin, arable=1.0, raw=1.0)
+        force_land(model, target, arable=1.0, raw=1.0)
+        regenerate_navigation(model)
+        nation = model.create_nation("#e83f6f", origin)
+        population = add_population(model, origin, count=140, nation=nation)
+
+        population.expand_or_migrate()
+
+        self.assertIsNone(model.population_at(target))
+        self.assertEqual(model.expansion_events, 0)
+
+        population.inhabitant_count = 160
+        population.expand_or_migrate()
+
+        self.assertIsNotNone(model.population_at(target))
+        self.assertEqual(model.expansion_events, 1)
+
+    def test_high_economic_investment_removes_naval_expansion_penalty(self):
+        model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
+        for y in range(model.height):
+            for x in range(model.width):
+                force_water(model, (x, y))
+        origin = (0, 1)
+        target = (2, 1)
+        force_land(model, origin, arable=1.0, raw=1.0)
+        force_land(model, target, arable=1.0, raw=1.0)
+        regenerate_navigation(model)
+        nation = model.create_nation("#e83f6f", origin)
+        population = Population(
+            unique_id=model.next_id(),
+            model=model,
+            inhabitant_count=140,
+            nation=nation,
+            beliefs={"x_tech": 0.0, "y_dip": 0.0, "e_econ_ratio": 1.0},
+        )
+        model.register_population(population, origin)
+
+        population.expand_or_migrate()
+
+        self.assertIsNotNone(model.population_at(target))
+
+    def test_land_expansion_still_uses_standard_threshold(self):
+        model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
+        for y in range(model.height):
+            for x in range(model.width):
+                force_water(model, (x, y))
+        origin = (1, 1)
+        target = (2, 1)
+        force_land(model, origin, arable=1.0, raw=1.0)
+        force_land(model, target, arable=1.0, raw=1.0)
+        regenerate_navigation(model)
+        nation = model.create_nation("#e83f6f", origin)
+        population = add_population(model, origin, count=140, nation=nation)
+
+        population.expand_or_migrate()
+
+        self.assertIsNotNone(model.population_at(target))
+
+    def test_amphibious_enemy_discovery_and_attack_debuff(self):
+        model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
+        for y in range(model.height):
+            for x in range(model.width):
+                force_water(model, (x, y))
+        attacker_pos = (0, 1)
+        defender_pos = (2, 1)
+        force_land(model, attacker_pos, arable=1.0, raw=1.0)
+        force_land(model, defender_pos, arable=1.0, raw=1.0)
+        regenerate_navigation(model)
+        attacker_nation = model.create_nation("#e83f6f", attacker_pos)
+        defender_nation = model.create_nation("#a855f7", defender_pos)
+        attacker = add_population(model, attacker_pos, count=200, nation=attacker_nation)
+        defender = add_population(model, defender_pos, count=80, nation=defender_nation)
+
+        targets = attacker.enemy_attack_targets()
+        self.assertEqual(targets, [(defender, True)])
+        land_plan = attacker.plan_attack(defender, is_amphibious=False)
+        naval_plan = attacker.plan_attack(defender, is_amphibious=True)
+        self.assertGreater(naval_plan.optimal_force, land_plan.optimal_force)
+        self.assertLess(naval_plan.actual_win_prob, land_plan.actual_win_prob)
+
+    def test_amphibious_conquest_uses_existing_conquest_behavior(self):
+        model = WorldModel(width=3, height=3, initial_populations=0, seed=1)
+        for y in range(model.height):
+            for x in range(model.width):
+                force_water(model, (x, y))
+        attacker_pos = (0, 1)
+        defender_pos = (2, 1)
+        force_land(model, attacker_pos, arable=1.0, raw=1.0)
+        defender_cell = force_land(model, defender_pos, arable=1.0, raw=1.0)
+        regenerate_navigation(model)
+        model.attack_scale_constant = 1000.0
+        attacker_nation = model.create_nation("#e83f6f", attacker_pos, refined_stockpile=100.0)
+        defender_nation = model.create_nation("#a855f7", defender_pos)
+        attacker = add_population(model, attacker_pos, count=300, nation=attacker_nation)
+        defender = add_population(model, defender_pos, count=10, nation=defender_nation)
+        model.rng = FixedRandom([0.0, 0.0])
+
+        attacked = attacker.maybe_attack_neighbor()
+
+        self.assertTrue(attacked)
+        self.assertIs(defender.nation, attacker_nation)
+        self.assertAlmostEqual(defender_cell.devastation, 1.0)
 
     def test_cli_accepts_new_modes_and_legacy_resources_alias(self):
         parser = build_parser()

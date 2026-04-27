@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import colorsys
 import random
+from collections import deque
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
@@ -306,6 +307,8 @@ class WorldModel(mesa.Model):
         self.raw_goods_map = geography.raw_goods_map
         self.resource_map = self.raw_goods_map
         self.carrying_capacity_map = geography.carrying_capacity_map
+        self.continent_map = self._generate_continents()
+        self.naval_crossings = self._generate_naval_crossings()
 
         self._populate_resource_layer()
         self._seed_populations()
@@ -441,6 +444,75 @@ class WorldModel(mesa.Model):
         hue = (0.83 + index * 0.071) % 1.0
         red, green, blue = colorsys.hsv_to_rgb(hue, 0.78, 0.95)
         return f"#{int(red * 255):02x}{int(green * 255):02x}{int(blue * 255):02x}"
+
+    def _generate_continents(self) -> np.ndarray:
+        continent_map = np.zeros((self.height, self.width), dtype=int)
+        continent_id = 0
+
+        for y in range(self.height):
+            for x in range(self.width):
+                if not self.terrain_map[y, x] or continent_map[y, x] != 0:
+                    continue
+                continent_id += 1
+                queue = deque([(x, y)])
+                continent_map[y, x] = continent_id
+                while queue:
+                    pos = queue.popleft()
+                    for neighbor_x, neighbor_y in self.neighbor_positions(pos, moore=True):
+                        if not self.terrain_map[neighbor_y, neighbor_x]:
+                            continue
+                        if continent_map[neighbor_y, neighbor_x] != 0:
+                            continue
+                        continent_map[neighbor_y, neighbor_x] = continent_id
+                        queue.append((neighbor_x, neighbor_y))
+
+        self.continent_map = continent_map
+        return continent_map
+
+    def _generate_naval_crossings(self) -> Dict[Position, List[Position]]:
+        crossings: Dict[Position, List[Position]] = {}
+
+        for y in range(self.height):
+            for x in range(self.width):
+                origin = (x, y)
+                if not self.terrain_map[y, x]:
+                    continue
+                origin_continent = int(self.continent_map[y, x])
+                if origin_continent <= 0:
+                    continue
+                neighbors = self.neighbor_positions(origin, moore=True)
+                if not any(not self.terrain_map[ny, nx] for nx, ny in neighbors):
+                    continue
+
+                targets = set()
+                visited_water = set()
+                queue = deque()
+                for neighbor_x, neighbor_y in neighbors:
+                    if self.terrain_map[neighbor_y, neighbor_x]:
+                        continue
+                    water_pos = (neighbor_x, neighbor_y)
+                    visited_water.add(water_pos)
+                    queue.append((water_pos, 1))
+
+                while queue:
+                    water_pos, depth = queue.popleft()
+                    for neighbor_x, neighbor_y in self.neighbor_positions(water_pos, moore=True):
+                        neighbor_pos = (neighbor_x, neighbor_y)
+                        if self.terrain_map[neighbor_y, neighbor_x]:
+                            target_continent = int(self.continent_map[neighbor_y, neighbor_x])
+                            if target_continent > 0 and target_continent != origin_continent:
+                                targets.add(neighbor_pos)
+                            continue
+                        if depth >= 3 or neighbor_pos in visited_water:
+                            continue
+                        visited_water.add(neighbor_pos)
+                        queue.append((neighbor_pos, depth + 1))
+
+                if targets:
+                    crossings[origin] = sorted(targets, key=lambda item: (item[1], item[0]))
+
+        self.naval_crossings = crossings
+        return crossings
 
     def _build_datacollector(self):
         model_reporters = {
@@ -871,6 +943,15 @@ class WorldModel(mesa.Model):
         return True
 
     def best_expansion_targets(self, pos: Position) -> List[Position]:
+        candidates = self.land_expansion_candidates(pos)
+        self.python_random.shuffle(candidates)
+        candidates.sort(
+            key=lambda candidate: self.food_growth_capacity_at(candidate),
+            reverse=True,
+        )
+        return candidates
+
+    def land_expansion_candidates(self, pos: Position) -> List[Position]:
         candidates = []
         for target_pos in self.neighbor_positions(pos, moore=True):
             target_cell = self.resource_cells.get(target_pos)
@@ -879,6 +960,21 @@ class WorldModel(mesa.Model):
             if target_pos in self.population_by_pos:
                 continue
             candidates.append(target_pos)
+        return candidates
+
+    def naval_expansion_candidates(self, pos: Position) -> List[Position]:
+        candidates = []
+        for target_pos in self.naval_crossings.get(pos, []):
+            target_cell = self.resource_cells.get(target_pos)
+            if target_cell is None or not target_cell.is_land:
+                continue
+            if target_pos in self.population_by_pos:
+                continue
+            candidates.append(target_pos)
+        return candidates
+
+    def naval_expansion_targets(self, pos: Position) -> List[Position]:
+        candidates = self.naval_expansion_candidates(pos)
 
         self.python_random.shuffle(candidates)
         candidates.sort(

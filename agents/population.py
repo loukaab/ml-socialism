@@ -88,6 +88,7 @@ class AttackPlan:
     actual_force: int
     actual_win_prob: float
     attack_chance: float
+    is_amphibious: bool = False
 
 
 class ResourceCell(mesa.Agent):
@@ -552,16 +553,34 @@ class Population(mesa.Agent):
         return None
 
     def bordering_enemy_populations(self) -> list["Population"]:
-        return [
-            neighbor
-            for neighbor in self.model.populations_near(self.pos)
-            if neighbor.nation is not self.nation
-        ]
+        return [enemy for enemy, _ in self.enemy_attack_targets()]
 
-    def plan_attack(self, target: "Population") -> Optional[AttackPlan]:
+    def enemy_attack_targets(self) -> list[tuple["Population", bool]]:
+        targets: list[tuple["Population", bool]] = []
+        seen_positions = set()
+        for neighbor in self.model.populations_near(self.pos):
+            if neighbor.nation is self.nation:
+                continue
+            targets.append((neighbor, False))
+            seen_positions.add(neighbor.pos)
+
+        for target_pos in self.model.naval_crossings.get(self.pos, []):
+            if target_pos in seen_positions:
+                continue
+            target = self.model.population_by_pos.get(target_pos)
+            if target is None or target.nation is self.nation:
+                continue
+            targets.append((target, True))
+            seen_positions.add(target_pos)
+        return targets
+
+    def plan_attack(self, target: "Population", is_amphibious: bool = False) -> Optional[AttackPlan]:
+        effective_military = self.military_output()
+        if is_amphibious:
+            effective_military *= 0.5
         defender_power = target.inhabitant_count * target.military_output()
-        if self.military_output() > 0:
-            optimal_force = 4.0 * (defender_power / self.military_output())
+        if effective_military > 0:
+            optimal_force = 4.0 * (defender_power / effective_military)
         else:
             optimal_force = float("inf")
 
@@ -571,7 +590,7 @@ class Population(mesa.Agent):
 
         actual_force_float = min(optimal_force, max_force)
         actual_force = max(1, int(actual_force_float))
-        actual_attacker_power = actual_force * self.military_output()
+        actual_attacker_power = actual_force * effective_military
         total_power = actual_attacker_power + defender_power
         if total_power > 0:
             actual_win_prob = actual_attacker_power / total_power
@@ -600,6 +619,7 @@ class Population(mesa.Agent):
             actual_force=actual_force,
             actual_win_prob=actual_win_prob,
             attack_chance=attack_chance,
+            is_amphibious=is_amphibious,
         )
 
     def maybe_attack_neighbor(self) -> bool:
@@ -608,8 +628,8 @@ class Population(mesa.Agent):
 
         plans = [
             plan
-            for enemy in self.bordering_enemy_populations()
-            if (plan := self.plan_attack(enemy)) is not None
+            for enemy, is_amphibious in self.enemy_attack_targets()
+            if (plan := self.plan_attack(enemy, is_amphibious=is_amphibious)) is not None
         ]
         if not plans:
             return False
@@ -671,12 +691,24 @@ class Population(mesa.Agent):
         capacity = self.model.food_growth_capacity_for_population(self)
         if capacity <= 0:
             return
-        if self.inhabitant_count < capacity * self.model.expansion_pressure_threshold:
+        standard_threshold = capacity * self.model.expansion_pressure_threshold
+        if self.inhabitant_count < standard_threshold:
             return
 
-        candidate_positions = self.model.best_expansion_targets(self.pos)
+        candidate_positions = self.model.land_expansion_candidates(self.pos)
+        econ_inv = self.investment_proportions["economic"]
+        naval_penalty = max(1.0, 1.5 - econ_inv)
+        if self.inhabitant_count >= standard_threshold * naval_penalty:
+            candidate_positions.extend(self.model.naval_expansion_candidates(self.pos))
+
         if not candidate_positions:
             return
+        candidate_positions = list(dict.fromkeys(candidate_positions))
+        self.model.python_random.shuffle(candidate_positions)
+        candidate_positions.sort(
+            key=lambda candidate: self.model.food_growth_capacity_at(candidate),
+            reverse=True,
+        )
 
         overflow = max(0, int(self.inhabitant_count - capacity * 0.72))
         migrants = max(
